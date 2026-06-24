@@ -25,6 +25,8 @@ with a split between the RF modem and the host service:
 | RF modem | Adafruit Feather M0 + RFM69HCW (`firmware/`) |
 | Protocol, state, MQTT | Python service (`src/frisquet_bridge/`) |
 
+![HA screenshot](./HA_view.png)
+
 ## Hardware
 
 - [Adafruit Feather M0 RFM69HCW](https://www.adafruit.com/product/3178), 868 MHz
