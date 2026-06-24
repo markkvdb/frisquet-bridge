@@ -29,7 +29,7 @@ with a split between the RF modem and the host service:
 
 ## Hardware
 
-- [Adafruit Feather M0 RFM69HCW](https://www.adafruit.com/product/3178), 868 MHz
+- [Adafruit Feather M0 RFM69HCW](https://www.adafruit.com/product/4072), 868 MHz
 - USB connection to a Raspberry Pi or other Linux host
 
 ## Quick start
