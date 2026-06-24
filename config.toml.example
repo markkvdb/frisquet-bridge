@@ -1,0 +1,45 @@
+[frisquet]
+network_id = "05d97f78"
+boiler_addr = "80"
+sensor_poll_interval_seconds = 30
+
+[frisquet.connect]
+mode = "read"
+association_id = "ea"
+
+[frisquet.sonde]
+enabled = true
+association_id = "9c"
+
+[frisquet.zone1]
+mode = "satellite"
+
+[frisquet.zone2]
+mode = "disabled"
+
+[frisquet.zone3]
+mode = "disabled"
+
+[serial]
+port = "/dev/serial/by-id/usb-Adafruit_Feather_M0_9E497F10503052534C2E3120FF150323-if00"
+speed = 115200
+
+[mqtt]
+enabled = true
+host = "127.0.0.1"
+port = 1883
+username = ""
+password = ""
+client_id = "frisquet-bridge"
+base_topic = "frisquet"
+
+[logging]
+level = "INFO"
+format = "console" # "console" or "json"
+file = "logs/frisquet-bridge.log"
+file_max_bytes = 10000000
+file_backup_count = 5
+raw_file = "logs/frisquet-bridge.raw.jsonl"
+raw_max_bytes = 50000000
+raw_backup_count = 5
+raw_lines = false

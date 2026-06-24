@@ -1,0 +1,44 @@
+[project]
+name = "frisquet-bridge"
+version = "0.1.0"
+description = "Tools for the Frisquet boiler RF bridge (Feather M0 modem + host service)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pyserial>=3.5",
+    "tomlkit>=0.13",
+    "aiomqtt>=2.3",
+    "structlog>=26.1.0",
+]
+
+[project.scripts]
+frisquet-bridge = "frisquet_bridge.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/frisquet_bridge"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.9",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 140
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"

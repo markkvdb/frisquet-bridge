@@ -1,0 +1,34 @@
+# Python / uv
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# PlatformIO
+firmware/.pio/
+firmware/.vscode/
+
+# Rust (service/)
+service/target/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local config, secrets, and runtime state
+config.toml
+config.*.toml
+*.state.json
+*.local.toml
+
+# Runtime logs and RF captures
+logs/**/*.log
+logs/**/*.log.*
+logs/**/*.jsonl
+logs/**/*.jsonl.*
+
+# Local planning notes
+*.plan.md

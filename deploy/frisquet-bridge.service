@@ -1,0 +1,21 @@
+[Unit]
+Description=Frisquet RF bridge
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+SupplementaryGroups=dialout
+WorkingDirectory=/home/pi/projects/frisquet-bridge
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/pi/projects/frisquet-bridge/.venv/bin/frisquet-bridge serve --config /home/pi/projects/frisquet-bridge/config.toml
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
