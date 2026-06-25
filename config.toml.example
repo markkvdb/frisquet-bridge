@@ -32,6 +32,7 @@ username = ""
 password = ""
 client_id = "frisquet-bridge"
 base_topic = "frisquet"
+language = "en" # "en" or "fr"
 
 [logging]
 level = "INFO"

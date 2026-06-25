@@ -35,6 +35,9 @@ association_id = "c0"
 [frisquet.zone3]
 mode = "disabled"
 
+[mqtt]
+language = "fr"
+
 [logging]
 level = "DEBUG"
 format = "json"
@@ -72,6 +75,7 @@ raw_lines = true
     assert cfg.identity("satellite_z2").association_id == 0xC0
     assert cfg.zone3 is not None
     assert cfg.zone3.mode == "disabled"
+    assert cfg.mqtt.language == "fr"
     assert cfg.logging.level == "DEBUG"
     assert cfg.logging.format == "json"
     assert cfg.logging.file == "logs/bridge.log"
@@ -102,6 +106,25 @@ boiler_addr = "80"
     assert cfg.boiler_entities_enabled is False
     assert cfg.sonde is None
     assert cfg.zone1 is None
+    assert cfg.mqtt.language == "en"
+
+
+def test_load_rejects_invalid_mqtt_language(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[frisquet]
+network_id = "05d97f78"
+boiler_addr = "80"
+
+[mqtt]
+language = "de"
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="mqtt.language"):
+        load(path)
 
 
 def test_load_satellite_zone_is_passive_without_identity(tmp_path: Path) -> None:
@@ -552,3 +575,4 @@ def test_save_writes_clean_nested_schema(tmp_path: Path) -> None:
     assert "use_satellite_z1" not in text
     assert "[home_assistant]" not in text
     assert "[logging]" in text
+    assert 'language = "en"' in text

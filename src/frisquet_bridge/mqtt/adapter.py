@@ -32,7 +32,7 @@ from frisquet_bridge.climate import (
 )
 from frisquet_bridge.config import BridgeConfig
 from frisquet_bridge.connect.ops import BoilerOps
-from frisquet_bridge.model import DHW_SELECTABLE_MODES, BoilerData, DhwMode
+from frisquet_bridge.model import DHW_SELECTABLE_MODES, BoilerData, BoilerStatus, DhwMode
 from frisquet_bridge.satellite import VirtualSatellite
 
 log = structlog.get_logger(__name__)
@@ -57,13 +57,95 @@ _RETIRED_ZONE_ENTITIES: tuple[tuple[str, str], ...] = tuple(
         ("sensor", "schedule_raw"),
     )
 )
+_RETIRED_CENTRAL_FLOW_ENTITIES: tuple[tuple[str, str], ...] = (
+    ("sensor", "central_flow_temperature"),
+    ("sensor", "central_flow_setpoint_temperature"),
+)
+
+_LABELS: dict[str, dict[str, str]] = {
+    "en": {
+        "dhw_temperature": "Boiler DHW temperature",
+        "dhw_instant_temperature": "Boiler DHW instant temperature",
+        "cdc_temperature": "Boiler heating body temperature",
+        "cdc_safety_temperature": "Boiler heating body safety probe temperature",
+        "flue_temperature": "Boiler flue temperature",
+        "dhw_power": "Boiler DHW instant power",
+        "heating_power": "Boiler heating instant power",
+        "pressure": "Boiler pressure",
+        "dhw_consumption": "Boiler DHW total consumption",
+        "heating_consumption": "Boiler heating total consumption",
+        "daily_dhw_consumption": "Boiler DHW previous day consumption",
+        "daily_heating_consumption": "Boiler heating previous day consumption",
+        "boiler_status": "Boiler status",
+        "dhw_mode": "Boiler DHW mode",
+        "outside_temperature": "Outside sensor temperature",
+        "central_heat_demand": "Central boiler heat demand",
+        "central_setpoint": "Central boiler setpoint",
+        "central_demand_on_delta": "Central boiler demand delta",
+        "central_demand_off_margin": "Central boiler off margin",
+        "central_boiler_status": "Central boiler status",
+        "central_outside_temperature": "Central boiler outside temperature",
+        "zone_heating": "Zone {zone} heating",
+        "zone_reported_ambient": "Zone {zone} reported room temperature",
+        "zone_flow_temperature": "Zone {zone} flow temperature",
+        "zone_flow_setpoint_temperature": "Zone {zone} flow setpoint temperature",
+    },
+    "fr": {
+        "dhw_temperature": "Chaudière température ECS",
+        "dhw_instant_temperature": "Chaudière température ECS instantanée",
+        "cdc_temperature": "Chaudière température CDC",
+        "cdc_safety_temperature": "Chaudière température sonde sécurité CDC",
+        "flue_temperature": "Chaudière température fumées",
+        "dhw_power": "Chaudière puissance instantanée ECS",
+        "heating_power": "Chaudière puissance instantanée chauffage",
+        "pressure": "Chaudière pression",
+        "dhw_consumption": "Chaudière consommation ECS totale",
+        "heating_consumption": "Chaudière consommation chauffage totale",
+        "daily_dhw_consumption": "Chaudière consommation ECS jour précédent",
+        "daily_heating_consumption": "Chaudière consommation chauffage jour précédent",
+        "boiler_status": "Chaudière état",
+        "dhw_mode": "Chaudière mode ECS",
+        "outside_temperature": "Sonde extérieure température",
+        "central_heat_demand": "Chaudière centrale demande chauffage",
+        "central_setpoint": "Chaudière centrale consigne",
+        "central_demand_on_delta": "Chaudière centrale delta demande",
+        "central_demand_off_margin": "Chaudière centrale marge arrêt",
+        "central_boiler_status": "Chaudière centrale état chaudière",
+        "central_outside_temperature": "Chaudière centrale température extérieure",
+        "zone_heating": "Zone {zone} chauffage",
+        "zone_reported_ambient": "Zone {zone} température ambiante déclarée",
+        "zone_flow_temperature": "Zone {zone} température départ",
+        "zone_flow_setpoint_temperature": "Zone {zone} température consigne départ",
+    },
+}
+
+_DHW_LABELS: dict[str, dict[DhwMode, str]] = {
+    "en": {mode: mode.value for mode in DhwMode},
+    "fr": {
+        DhwMode.MAX: "Max",
+        DhwMode.ECO: "Eco",
+        DhwMode.ECO_SCHEDULE: "Eco Horaires",
+        DhwMode.ECO_PLUS: "Eco+",
+        DhwMode.ECO_PLUS_SCHEDULE: "Eco+ Horaires",
+        DhwMode.STOP: "Stop",
+    },
+}
+
+_BOILER_STATUS_LABELS: dict[str, dict[BoilerStatus, str]] = {
+    "en": {status: status.value for status in BoilerStatus},
+    "fr": {
+        BoilerStatus.STANDBY: "Veille",
+        BoilerStatus.RUNNING: "En marche",
+        BoilerStatus.HEATING_OFF: "Chauffage arrêté",
+    },
+}
 
 
 @dataclass(frozen=True, slots=True)
 class EntitySpec:
     component: str
     entity_id: str
-    name: str
+    label_key: str
     state_suffix: str
     device_class: str | None = None
     unit: str | None = None
@@ -78,7 +160,7 @@ BOILER_SENSOR_ENTITIES = (
     EntitySpec(
         "sensor",
         "dhw_temperature",
-        "DHW temperature",
+        "dhw_temperature",
         "boiler/dhwTemperature",
         "temperature",
         "°C",
@@ -88,7 +170,7 @@ BOILER_SENSOR_ENTITIES = (
     EntitySpec(
         "sensor",
         "dhw_instant_temperature",
-        "DHW instant temperature",
+        "dhw_instant_temperature",
         "boiler/dhwInstantTemperature",
         "temperature",
         "°C",
@@ -98,7 +180,7 @@ BOILER_SENSOR_ENTITIES = (
     EntitySpec(
         "sensor",
         "cdc_temperature",
-        "CDC temperature",
+        "cdc_temperature",
         "boiler/cdcTemperature",
         "temperature",
         "°C",
@@ -108,7 +190,7 @@ BOILER_SENSOR_ENTITIES = (
     EntitySpec(
         "sensor",
         "cdc_safety_temperature",
-        "CDC safety temperature",
+        "cdc_safety_temperature",
         "boiler/cdcSafetyTemperature",
         "temperature",
         "°C",
@@ -118,7 +200,7 @@ BOILER_SENSOR_ENTITIES = (
     EntitySpec(
         "sensor",
         "flue_temperature",
-        "Flue temperature",
+        "flue_temperature",
         "boiler/flueTemperature",
         "temperature",
         "°C",
@@ -128,7 +210,7 @@ BOILER_SENSOR_ENTITIES = (
     EntitySpec(
         "sensor",
         "dhw_power",
-        "DHW instant power",
+        "dhw_power",
         "boiler/dhwInstantPower",
         "power",
         "kW",
@@ -138,7 +220,7 @@ BOILER_SENSOR_ENTITIES = (
     EntitySpec(
         "sensor",
         "heating_power",
-        "Heating instant power",
+        "heating_power",
         "boiler/heatingInstantPower",
         "power",
         "kW",
@@ -146,15 +228,15 @@ BOILER_SENSOR_ENTITIES = (
         suggested_display_precision=1,
     ),
     EntitySpec(
-        "sensor", "pressure", "Pressure", "boiler/pressure", "pressure", "bar", state_class="measurement", suggested_display_precision=1
+        "sensor", "pressure", "pressure", "boiler/pressure", "pressure", "bar", state_class="measurement", suggested_display_precision=1
     ),
     EntitySpec(
-        "sensor", "dhw_consumption", "DHW total consumption", "boiler/dhwConsumption", "energy", "kWh", state_class="total_increasing"
+        "sensor", "dhw_consumption", "dhw_consumption", "boiler/dhwConsumption", "energy", "kWh", state_class="total_increasing"
     ),
     EntitySpec(
         "sensor",
         "heating_consumption",
-        "Heating total consumption",
+        "heating_consumption",
         "boiler/heatingConsumption",
         "energy",
         "kWh",
@@ -163,7 +245,7 @@ BOILER_SENSOR_ENTITIES = (
     EntitySpec(
         "sensor",
         "daily_dhw_consumption",
-        "DHW previous day consumption",
+        "daily_dhw_consumption",
         "boiler/dailyDhwConsumption",
         "energy",
         "kWh",
@@ -172,19 +254,19 @@ BOILER_SENSOR_ENTITIES = (
     EntitySpec(
         "sensor",
         "daily_heating_consumption",
-        "Heating previous day consumption",
+        "daily_heating_consumption",
         "boiler/dailyHeatingConsumption",
         "energy",
         "kWh",
         state_class="measurement",
     ),
-    EntitySpec("sensor", "boiler_status", "Boiler status", "boiler/status"),
+    EntitySpec("sensor", "boiler_status", "boiler_status", "boiler/status"),
 )
 
 DHW_MODE_ENTITY = EntitySpec(
     "select",
     "dhw_mode",
-    "DHW mode",
+    "dhw_mode",
     "boiler/dhwMode",
     command=True,
     options=tuple(m.value for m in DHW_SELECTABLE_MODES),
@@ -193,7 +275,7 @@ DHW_MODE_ENTITY = EntitySpec(
 DHW_MODE_SENSOR_ENTITY = EntitySpec(
     "sensor",
     "dhw_mode",
-    "DHW mode",
+    "dhw_mode",
     "boiler/dhwMode",
 )
 
@@ -201,7 +283,7 @@ SONDE_ENTITIES = (
     EntitySpec(
         "number",
         "outside_temperature",
-        "Outside temperature",
+        "outside_temperature",
         "outsideSensor/outsideTemperature",
         "temperature",
         "°C",
@@ -247,6 +329,18 @@ class MqttAdapter:
     def _discovery_topic(self, component: str, entity_id: str) -> str:
         return f"homeassistant/{component}/{DEVICE_ID}/{entity_id}/config"
 
+    def _label(self, key: str, **placeholders: object) -> str:
+        template = _LABELS.get(self._cfg.mqtt.language, _LABELS["en"]).get(key, _LABELS["en"].get(key, key))
+        return template.format(**placeholders)
+
+    def _dhw_label(self, mode: DhwMode) -> str:
+        return _DHW_LABELS.get(self._cfg.mqtt.language, _DHW_LABELS["en"])[mode]
+
+    def _boiler_status_label(self, status: BoilerStatus | None) -> str | None:
+        if status is None:
+            return None
+        return _BOILER_STATUS_LABELS.get(self._cfg.mqtt.language, _BOILER_STATUS_LABELS["en"])[status]
+
     def _device_block(self) -> dict[str, Any]:
         return {
             "identifiers": [DEVICE_ID],
@@ -255,15 +349,19 @@ class MqttAdapter:
             "model": "Eco Radio Visio",
         }
 
+    def _origin_block(self) -> dict[str, Any]:
+        return {"name": "frisquet-bridge"}
+
     def _base_discovery_payload(self, spec: EntitySpec) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "name": spec.name,
+            "name": self._label(spec.label_key),
             "unique_id": f"{DEVICE_ID}_{spec.entity_id}",
             "state_topic": self._topic(spec.state_suffix),
             "availability_topic": self.availability_topic(),
             "payload_available": "online",
             "payload_not_available": "offline",
             "device": self._device_block(),
+            "origin": self._origin_block(),
         }
         if spec.device_class:
             payload["device_class"] = spec.device_class
@@ -272,7 +370,10 @@ class MqttAdapter:
         if spec.command:
             payload["command_topic"] = self._topic(f"{spec.state_suffix}/set")
         if spec.options:
-            payload["options"] = list(spec.options)
+            if spec.entity_id == "dhw_mode":
+                payload["options"] = [self._dhw_label(mode) for mode in DHW_SELECTABLE_MODES]
+            else:
+                payload["options"] = list(spec.options)
         if spec.state_class:
             payload["state_class"] = spec.state_class
         if spec.entity_category:
@@ -288,6 +389,7 @@ class MqttAdapter:
         payload["availability_topic"] = self.availability_topic()
         payload["payload_available"] = "online"
         payload["payload_not_available"] = "offline"
+        payload["origin"] = self._origin_block()
         return payload
 
     def _zone_config(self, zone: int) -> Any:
@@ -336,7 +438,7 @@ class MqttAdapter:
         count = 0
         device = self._device_block()
         switch_payload = {
-            "name": "Central boiler heat demand",
+            "name": self._label("central_heat_demand"),
             "unique_id": f"{DEVICE_ID}_central_heat_demand",
             "state_topic": self._topic("central/demand"),
             "command_topic": self._topic("central/demand/set"),
@@ -349,13 +451,13 @@ class MqttAdapter:
             count += 1
 
         number_specs = (
-            ("central_setpoint", "Central boiler setpoint", "central/setpoint", 5, 30, 0.5),
-            ("central_demand_on_delta", "Central boiler demand delta", "central/demandOnDelta", 0, 15, 0.1),
-            ("central_demand_off_margin", "Central boiler off margin", "central/demandOffMargin", 0, 15, 0.1),
+            ("central_setpoint", "central_setpoint", "central/setpoint", 5, 30, 0.5),
+            ("central_demand_on_delta", "central_demand_on_delta", "central/demandOnDelta", 0, 15, 0.1),
+            ("central_demand_off_margin", "central_demand_off_margin", "central/demandOffMargin", 0, 15, 0.1),
         )
-        for entity_id, name, suffix, min_value, max_value, step in number_specs:
+        for entity_id, label_key, suffix, min_value, max_value, step in number_specs:
             payload = {
-                "name": name,
+                "name": self._label(label_key),
                 "unique_id": f"{DEVICE_ID}_{entity_id}",
                 "state_topic": self._topic(suffix),
                 "command_topic": self._topic(f"{suffix}/set"),
@@ -365,6 +467,7 @@ class MqttAdapter:
                 "max": max_value,
                 "mode": "box",
                 "step": step,
+                "entity_category": "config",
                 "device": device,
             }
             self._add_availability(payload)
@@ -372,20 +475,12 @@ class MqttAdapter:
                 count += 1
 
         sensor_specs = (
-            ("central_flow_temperature", "Central flow temperature", "central/flowTemperature", "temperature", "°C"),
-            (
-                "central_flow_setpoint_temperature",
-                "Central flow setpoint",
-                "central/flowSetpointTemperature",
-                "temperature",
-                "°C",
-            ),
-            ("central_boiler_status", "Central boiler status", "central/boilerStatus", None, None),
-            ("central_outside_temperature", "Central outside temperature", "central/outsideTemperature", "temperature", "°C"),
+            ("central_boiler_status", "central_boiler_status", "central/boilerStatus", None, None),
+            ("central_outside_temperature", "central_outside_temperature", "central/outsideTemperature", "temperature", "°C"),
         )
-        for entity_id, name, suffix, device_class, unit in sensor_specs:
+        for entity_id, label_key, suffix, device_class, unit in sensor_specs:
             payload = {
-                "name": name,
+                "name": self._label(label_key),
                 "unique_id": f"{DEVICE_ID}_{entity_id}",
                 "state_topic": self._topic(suffix),
                 "device": device,
@@ -397,6 +492,27 @@ class MqttAdapter:
                 payload["suggested_display_precision"] = 1
             if unit:
                 payload["unit_of_measurement"] = unit
+            if await self._publish_discovery_payload(client, "sensor", entity_id, payload):
+                count += 1
+        return count
+
+    async def _publish_zone_flow_discovery(self, client: aiomqtt.Client, zone: int) -> int:
+        count = 0
+        for entity_id, label_key, suffix in (
+            (f"zone{zone}_flow_temperature", "zone_flow_temperature", f"z{zone}/flowTemperature"),
+            (f"zone{zone}_flow_setpoint_temperature", "zone_flow_setpoint_temperature", f"z{zone}/flowSetpointTemperature"),
+        ):
+            payload = {
+                "name": self._label(label_key, zone=zone),
+                "unique_id": f"{DEVICE_ID}_{entity_id}",
+                "state_topic": self._topic(suffix),
+                "device_class": "temperature",
+                "state_class": "measurement",
+                "unit_of_measurement": "°C",
+                "suggested_display_precision": 1,
+                "device": self._device_block(),
+            }
+            self._add_availability(payload)
             if await self._publish_discovery_payload(client, "sensor", entity_id, payload):
                 count += 1
         return count
@@ -430,6 +546,7 @@ class MqttAdapter:
         for zone in (1, 2, 3):
             if not self._cfg.zone_enabled(zone):
                 continue
+            published_count += await self._publish_zone_flow_discovery(client, zone)
             if self._is_central_zone(zone):
                 published_count += await self._publish_central_discovery(client)
                 await self._clear_discovery(client, "climate", f"zone{zone}_climate")
@@ -442,7 +559,7 @@ class MqttAdapter:
                 modes = SIMPLE_HVAC_MODES if self._is_simple_zone(zone) else HVAC_MODES
                 preset_modes = SIMPLE_PRESET_MODES if self._is_simple_zone(zone) else MQTT_PRESET_MODES
                 climate_payload: dict[str, Any] = {
-                    "name": f"Heating Z{zone}",
+                    "name": self._label("zone_heating", zone=zone),
                     "unique_id": f"{DEVICE_ID}_{entity_id}",
                     "modes": list(modes),
                     "mode_state_topic": self._topic(f"{prefix}/mode"),
@@ -479,7 +596,7 @@ class MqttAdapter:
                 ambient_key = f"number.{ambient_id}"
                 if ambient_key not in self._published:
                     ambient_payload = {
-                        "name": f"Z{zone} reported ambient",
+                        "name": self._label("zone_reported_ambient", zone=zone),
                         "unique_id": f"{DEVICE_ID}_{ambient_id}",
                         "state_topic": self._topic(f"z{zone}/reportedAmbient"),
                         "command_topic": self._topic(f"z{zone}/reportedAmbient/set"),
@@ -498,6 +615,8 @@ class MqttAdapter:
 
         if not self._retired_cleared:
             for component, entity_id in _RETIRED_ZONE_ENTITIES:
+                await client.publish(self._discovery_topic(component, entity_id), "", retain=True)
+            for component, entity_id in _RETIRED_CENTRAL_FLOW_ENTITIES:
                 await client.publish(self._discovery_topic(component, entity_id), "", retain=True)
             self._retired_cleared = True
 
@@ -526,28 +645,28 @@ class MqttAdapter:
                     "boiler/heatingConsumption": _fmt_int(b.heating_consumption),
                     "boiler/dailyDhwConsumption": _fmt_int(b.daily_dhw_consumption),
                     "boiler/dailyHeatingConsumption": _fmt_int(b.daily_heating_consumption),
-                    "boiler/status": b.status.value if b.status else None,
+                    "boiler/status": self._boiler_status_label(b.status),
                 }
             )
         if self._boiler_entities_enabled():
             dhw_mode = self._visible_dhw_mode()
-            mapping["boiler/dhwMode"] = dhw_mode.value if dhw_mode else None
+            mapping["boiler/dhwMode"] = self._dhw_label(dhw_mode) if dhw_mode else None
         if self._cfg.sonde is not None and self._cfg.sonde.enabled:
             mapping["outsideSensor/outsideTemperature"] = _fmt(self._data.sonde.outside_temperature)
         for zone, state in self._data.zones.items():
             if not self._cfg.zone_enabled(zone):
                 continue
+            prefix = f"z{zone}"
+            mapping[f"{prefix}/flowTemperature"] = _fmt(state.flow_temperature)
+            mapping[f"{prefix}/flowSetpointTemperature"] = _fmt(state.flow_setpoint_temperature)
             if self._is_central_zone(zone):
                 mapping["central/demand"] = _fmt_bool(state.central_demand)
                 mapping["central/setpoint"] = _fmt(state.central_setpoint)
                 mapping["central/demandOnDelta"] = _fmt(state.central_demand_on_delta)
                 mapping["central/demandOffMargin"] = _fmt(state.central_demand_off_margin)
-                mapping["central/flowTemperature"] = _fmt(state.flow_temperature)
-                mapping["central/flowSetpointTemperature"] = _fmt(state.flow_setpoint_temperature)
-                mapping["central/boilerStatus"] = b.status.value if b.status else None
+                mapping["central/boilerStatus"] = self._boiler_status_label(b.status)
                 mapping["central/outsideTemperature"] = _fmt(b.outside_temperature)
                 continue
-            prefix = f"z{zone}"
             mapping[f"{prefix}/mode"] = simple_hvac_mode(state) if self._is_simple_zone(zone) else zone_hvac_mode(state)
             mapping[f"{prefix}/preset"] = simple_preset(state) if self._is_simple_zone(zone) else zone_preset(state)
             mapping[f"{prefix}/action"] = zone_hvac_action(state, b)
@@ -573,7 +692,7 @@ class MqttAdapter:
                 self._last_published_dhw_mode = dhw_mode
                 log.info(
                     "mqtt_dhw_state_published",
-                    mode=dhw_mode.value if dhw_mode is not None else None,
+                    mode=self._dhw_label(dhw_mode) if dhw_mode is not None else None,
                     pending=self._pending_dhw_mode is not None and time.monotonic() < self._pending_dhw_until,
                 )
         log.debug("mqtt_state_published", topic_count=published_count)
@@ -593,6 +712,7 @@ class MqttAdapter:
             self._pending_dhw_until = time.monotonic() + DHW_PENDING_SECONDS
             if self._on_change:
                 await self._on_change()
+
             try:
                 await self._ops.write_dhw_mode(self._data, mode)
             except Exception:
@@ -634,6 +754,18 @@ class MqttAdapter:
                 return
             if self._on_change:
                 await self._on_change()
+
+    async def handle_message(self, client: aiomqtt.Client, topic: str, payload: str) -> None:
+        body = payload.strip()
+        if topic == "homeassistant/status":
+            if body == "online":
+                self._published.clear()
+                self._retired_cleared = False
+                await self.publish_discovery(client)
+                await self.publish_state(client)
+                log.info("mqtt_homeassistant_birth_handled")
+            return
+        await self.handle_command(topic, body)
 
     async def _handle_central_command(self, command: str, payload: str) -> None:
         if not self._is_central_zone(1):
@@ -739,12 +871,14 @@ class MqttAdapter:
         await self.publish_state(client)
         cmd_filter = f"{self._base}/+/+/set"
         await client.subscribe(cmd_filter)
+        await client.subscribe("homeassistant/status")
         log.info("mqtt_subscribed", topic_filter=cmd_filter)
+        log.info("mqtt_subscribed", topic_filter="homeassistant/status")
         async for message in client.messages:
             topic = str(message.topic)
             body = message.payload.decode("utf-8", errors="replace")
             try:
-                await self.handle_command(topic, body)
+                await self.handle_message(client, topic, body)
             except Exception as exc:
                 log.exception("mqtt_command_failed", topic=topic, error=str(exc))
 

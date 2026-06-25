@@ -158,10 +158,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if args.msg_type:
-        msg_types = {_parse_int(value) for value in args.msg_type}
-    else:
-        msg_types = {0x10, 0x45}
+    msg_types = {_parse_int(value) for value in args.msg_type} if args.msg_type else {0x10, 0x45}
 
     boiler_addr = _parse_int(args.boiler_addr)
     all_frames: list[PushFrame] = []

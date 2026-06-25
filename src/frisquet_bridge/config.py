@@ -23,6 +23,7 @@ SATELLITE_IDENTITY_MODES = {"virtual_satellite", "simple_satellite", "central_bo
 VIRTUAL_SATELLITE_MODES = {"virtual_satellite", "simple_satellite", "central_boiler"}
 LOG_FORMATS = {"console", "json"}
 LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+MQTT_LANGUAGES = {"en", "fr"}
 
 
 @dataclass
@@ -40,6 +41,7 @@ class MqttConfig:
     password: str = ""
     client_id: str = "frisquet-bridge"
     base_topic: str = "frisquet"
+    language: str = "en"
 
 
 @dataclass
@@ -250,6 +252,7 @@ class BridgeConfig:
         mqtt.add("password", self.mqtt.password)
         mqtt.add("client_id", self.mqtt.client_id)
         mqtt.add("base_topic", self.mqtt.base_topic)
+        mqtt.add("language", self.mqtt.language)
         doc.add("mqtt", mqtt)
 
         logging = tomlkit.table()
@@ -317,7 +320,7 @@ def load(path: str | Path) -> BridgeConfig:
         cfg.serial.speed = int(serial["speed"])
 
     mqtt = _optional_table(data, "mqtt") or {}
-    _validate_keys(mqtt, {"enabled", "host", "port", "username", "password", "client_id", "base_topic"}, "mqtt")
+    _validate_keys(mqtt, {"enabled", "host", "port", "username", "password", "client_id", "base_topic", "language"}, "mqtt")
     if mqtt:
         if "enabled" in mqtt:
             cfg.mqtt.enabled = _required_bool(mqtt, "enabled", "mqtt.enabled")
@@ -327,6 +330,7 @@ def load(path: str | Path) -> BridgeConfig:
         cfg.mqtt.password = str(mqtt.get("password", cfg.mqtt.password))
         cfg.mqtt.client_id = str(mqtt.get("client_id", cfg.mqtt.client_id))
         cfg.mqtt.base_topic = str(mqtt.get("base_topic", cfg.mqtt.base_topic))
+        cfg.mqtt.language = _parse_mqtt_language(str(mqtt.get("language", cfg.mqtt.language)), "mqtt.language")
 
     logging_config = _optional_table(data, "logging") or {}
     _validate_keys(
@@ -530,3 +534,11 @@ def _parse_zone_mode(value: str, field_name: str) -> str:
         choices = ", ".join(sorted(ZONE_MODES))
         raise ConfigError(f"{field_name}: expected one of {choices}, got {value!r}")
     return value
+
+
+def _parse_mqtt_language(value: str, field_name: str) -> str:
+    normalized = value.strip().casefold()
+    if normalized not in MQTT_LANGUAGES:
+        choices = ", ".join(sorted(MQTT_LANGUAGES))
+        raise ConfigError(f"{field_name}: expected one of {choices}, got {value!r}")
+    return normalized

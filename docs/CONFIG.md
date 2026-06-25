@@ -92,6 +92,7 @@ Zone mode details:
 | `username`, `password` | Broker credentials, if needed. |
 | `client_id` | MQTT client id for this bridge instance. |
 | `base_topic` | Root topic, usually `frisquet`. |
+| `language` | Discovery/state display language: `en` or `fr`. Defaults to `en`. |
 
 ## `[logging]`
 
