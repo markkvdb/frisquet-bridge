@@ -61,6 +61,7 @@ class PollScheduler:
                 # the boiler does not serve a zone-config read to Connect.
                 await self._safe_poll("satellite_info", lambda: self._ops.read_satellite_info(self._data))
                 sensor_due = now + self._sensor_interval
+                self._log_state()
             if self._poll_connect and self._ops is not None and now >= slow_due:
                 await self._safe_poll("consumption", lambda: self._ops.read_consumption(self._data))
                 await self._safe_poll("daily_consumption", lambda: self._ops.read_daily_consumption(self._data))
@@ -98,3 +99,31 @@ class PollScheduler:
                 await self._on_update()
         except Exception:
             log.exception("poll_failed", poll=name)
+
+    def _log_state(self) -> None:
+        """Log the current internal state (zone temps, modes, boiler) for debugging."""
+        d = self._data
+        for z in self._enabled_zones:
+            zs = d.zones[z]
+            log.info(
+                "zone_state",
+                zone=z,
+                ambient_temperature=zs.ambient_temperature,
+                reported_ambient=zs.reported_ambient,
+                mode=zs.mode.value if zs.mode is not None else None,
+                setpoint_temperature=zs.setpoint_temperature,
+                flow_temperature=zs.flow_temperature,
+                flow_setpoint_temperature=zs.flow_setpoint_temperature,
+                comfort_temperature=zs.comfort_temperature,
+                reduced_temperature=zs.reduced_temperature,
+                frost_temperature=zs.frost_temperature,
+                override=zs.override,
+                boost=zs.boost,
+            )
+        log.info(
+            "boiler_state",
+            outside_temperature=d.sonde.outside_temperature,
+            boiler_status=d.boiler.status.value if d.boiler.status is not None else None,
+            boiler_fault=d.boiler.fault,
+            dhw_temperature=d.boiler.dhw_temperature,
+        )

@@ -41,6 +41,7 @@ def _serialize_zone(zone: ZoneState) -> dict[str, object] | None:
         zone.comfort_temperature,
         zone.reduced_temperature,
         zone.frost_temperature,
+        zone.reported_ambient,
     )
     central_values = (
         zone.central_setpoint,
@@ -63,6 +64,7 @@ def _serialize_zone(zone: ZoneState) -> dict[str, object] | None:
         "comfort_temperature": zone.comfort_temperature,
         "reduced_temperature": zone.reduced_temperature,
         "frost_temperature": zone.frost_temperature,
+        "reported_ambient": zone.reported_ambient,
         "schedule": schedule_hex,
         "central_setpoint": zone.central_setpoint,
         "central_demand": zone.central_demand,
@@ -81,6 +83,9 @@ def _apply_zone(zone: ZoneState, raw: dict[str, object]) -> None:
         value = raw.get(attr)
         if isinstance(value, int | float) and not isinstance(value, bool):
             setattr(zone, attr, float(value))
+    reported_ambient = raw.get("reported_ambient")
+    if isinstance(reported_ambient, int | float) and not isinstance(reported_ambient, bool):
+        zone.reported_ambient = float(reported_ambient)
     central_demand = raw.get("central_demand")
     if isinstance(central_demand, bool):
         zone.central_demand = central_demand

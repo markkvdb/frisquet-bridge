@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from frisquet_bridge.cli import listen, outside_temp, pair, read, recover_id, serve
+from frisquet_bridge.cli import listen, outside_temp, pair, probe_memory, read, recover_id, serve
 from frisquet_bridge.cli.options import add_logging_options
 from frisquet_bridge.config import LoggingConfig, load
 from frisquet_bridge.logging import RawMessageRecorder, bind_process_context, configure_logging
@@ -29,6 +29,7 @@ def main(argv: list[str] | None = None) -> int:
     listen.register(sub)
     outside_temp.register(sub)
     pair.register(sub)
+    probe_memory.register(sub)
     read.register(sub)
     recover_id.register(sub)
     serve.register(sub)
