@@ -11,7 +11,7 @@ from frisquet_bridge.connect import ops as ops_module
 from frisquet_bridge.connect.client import FrisquetClient
 from frisquet_bridge.connect.ops import BoilerOps
 from frisquet_bridge.connect.state import ProtocolState
-from frisquet_bridge.frame import ADDR_SATELLITE_Z1, MSG_INIT, Frame
+from frisquet_bridge.frame import ADDR_SATELLITE_Z1, MSG_INIT, MSG_READ, Frame
 from frisquet_bridge.model import BoilerData, DhwMode, ZoneMode
 from tests.helpers import FakeTransport, seed_zone_metadata
 
@@ -177,6 +177,20 @@ async def test_send_zone_consigne_emits_satellite_write(fake_transport: FakeTran
     assert data.zones[1].ambient_temperature == pytest.approx(27.3)
 
 
+async def test_read_satellite_info_uses_read_without_writing_ambient(fake_transport: FakeTransport) -> None:
+    fake_transport.read_responses = {0xA029: _SATELLITE_INFO}
+    fake_transport.init_responses = {0x01: _SATELLITE_INFO}
+    ops = _ops(fake_transport)
+    data = BoilerData()
+
+    await ops.read_satellite_info(data)
+
+    sent = fake_transport.sent[0]
+    assert sent.msg_type == MSG_READ
+    assert sent.payload == bytes.fromhex("a0290015")
+    assert data.zones[1].ambient_temperature == pytest.approx(27.3)
+
+
 async def test_write_zone_boost_requires_comfort_mode(fake_transport: FakeTransport) -> None:
     ops = _ops(fake_transport)
     data = BoilerData()
@@ -218,7 +232,7 @@ async def test_write_zone_override_forces_auto_derogation(fake_transport: FakeTr
 
 async def test_read_satellite_info_populates_zone_mode() -> None:
     payload = bytes.fromhex("2a050a000026062216274421010111005000100000000004f6000000000000000004f60000000000000000")
-    transport = FakeTransport(init_responses={0x01: payload})
+    transport = FakeTransport(read_responses={0xA029: payload})
     ops = _ops(transport)
     data = BoilerData()
 

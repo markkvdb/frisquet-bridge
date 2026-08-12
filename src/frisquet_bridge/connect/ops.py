@@ -92,15 +92,6 @@ class BoilerOps:
     def _addr(self, base: int) -> int:
         return memory_address(base, boiler_addr=self._boiler_addr)
 
-    def _satellite_info_init_payload(self) -> bytes:
-        return struct.pack(
-            ">HHHH",
-            self._addr(ADDR_SATELLITE_INFO),
-            0x0015,
-            self._addr(0xA02F),
-            0x0004,
-        ) + bytes((0x08, 0x01, 0x0D, 0x00, 0x50, 0x00, 0x14, 0x00, 0x00, 0x00))
-
     async def read_sensors(self, data: BoilerData) -> None:
         payload = await self._client.read_memory(self._addr(ADDR_SENSORS), 0x001C)
         decode_sensors(payload, data)
@@ -122,12 +113,11 @@ class BoilerOps:
         decode_clock(payload, data)
 
     async def read_satellite_info(self, data: BoilerData) -> None:
-        response = await self._client.request(
-            control=0x01,
-            msg_type=MSG_INIT,
-            payload=self._satellite_info_init_payload(),
-        )
-        decode_satellite_init_response(response.payload, data)
+        # The old captured INIT body contained 0x010d, which is an ambient
+        # temperature of 26.9°C, not part of the address. Replaying it here
+        # wrote 26.9°C to 0xa02f on every poll. Satellite info is read-only.
+        payload = await self._client.read_memory(self._addr(ADDR_SATELLITE_INFO), 0x0015)
+        decode_satellite_init_response(payload, data)
         log.debug("satellite_info_read")
 
     async def ensure_zone_metadata(self, zone: int, data: BoilerData) -> None:
