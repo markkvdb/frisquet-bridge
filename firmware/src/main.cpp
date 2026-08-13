@@ -15,10 +15,11 @@
 #define CONFIG_FSK                                                             \
   (RH_RF69_DATAMODUL_DATAMODE_PACKET | RH_RF69_DATAMODUL_MODULATIONTYPE_FSK |  \
    RH_RF69_DATAMODUL_MODULATIONSHAPING_FSK_NONE)
+// Leave CrcAutoClearOff unset so the RFM69 discards RF packets whose CRC
+// fails; forwarding them caused one-bit-shifted 0x79e0 temperatures.
 #define CONFIG_WHITE                                                           \
   (RH_RF69_PACKETCONFIG1_PACKETFORMAT_VARIABLE |                               \
    RH_RF69_PACKETCONFIG1_DCFREE_NONE | RH_RF69_PACKETCONFIG1_CRC_ON |           \
-   RH_RF69_PACKETCONFIG1_CRCAUTOCLEAROFF |                                     \
    RH_RF69_PACKETCONFIG1_ADDRESSFILTERING_NONE)
 
 RH_RF69 rf69(RFM69_CS, RFM69_INT);
