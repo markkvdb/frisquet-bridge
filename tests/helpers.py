@@ -88,6 +88,9 @@ class FakeTransport(Transport):
     async def sleep(self) -> None:
         pass
 
+    async def wait_failed(self) -> None:
+        await asyncio.Event().wait()
+
     async def send(self, frame: Frame) -> None:
         if self.send_raises is not None:
             raise self.send_raises

@@ -218,7 +218,11 @@ class BridgeService:
                 task.add_done_callback(self._log_task_done)
 
             log.info("service_started", tasks=[task.get_name() for task in tasks])
-            await self._stop.wait()
+            failure: BaseException | None = None
+            try:
+                await self._wait_for_stop_or_transport_failure(transport.wait_failed())
+            except BaseException as exc:
+                failure = exc
             scheduler.stop()
             for satellite in virtual_satellites.values():
                 satellite.stop()
@@ -226,8 +230,36 @@ class BridgeService:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             if adapter is not None and mqtt_client is not None:
-                await adapter.publish_offline(mqtt_client)
+                await self._publish_offline_preserving_failure(adapter, mqtt_client, failure)
             log.info("service_stopped")
+            if failure is not None:
+                raise failure
+
+    async def _publish_offline_preserving_failure(
+        self,
+        adapter: MqttAdapter,
+        mqtt_client: aiomqtt.Client,
+        failure: BaseException | None,
+    ) -> None:
+        try:
+            await adapter.publish_offline(mqtt_client)
+        except Exception:
+            if failure is None:
+                raise
+            log.exception("mqtt_offline_publish_failed_during_shutdown")
+
+    async def _wait_for_stop_or_transport_failure(self, failure: object) -> None:
+        stop_task = asyncio.create_task(self._stop.wait())
+        failure_task = asyncio.ensure_future(failure)  # type: ignore[arg-type]
+        done, pending = await asyncio.wait(
+            (stop_task, failure_task),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        if failure_task in done:
+            await failure_task
 
     def _log_task_done(self, task: asyncio.Task[object]) -> None:
         if task.cancelled():

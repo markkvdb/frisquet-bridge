@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+import serial
 
 from frisquet_bridge.frame import Frame
 from frisquet_bridge.protocol import crc8
@@ -95,6 +96,39 @@ def test_handle_line_heartbeat_is_ignored(transport: SerialTransport) -> None:
     transport._handle_line("HB")
 
     assert queue.empty()
+
+
+async def test_reader_failure_fails_pending_command_and_signals_terminal_failure() -> None:
+    class FailingSerial:
+        def readline(self) -> bytes:
+            raise serial.SerialException("device disconnected")
+
+    transport = SerialTransport("/dev/null")
+    transport._serial = FailingSerial()  # type: ignore[assignment]
+    transport._loop = asyncio.get_running_loop()
+    pending = asyncio.get_running_loop().create_future()
+    transport._pending = pending
+
+    transport._read_loop()
+    with pytest.raises(TransportError, match="serial reader failed"):
+        await pending
+    with pytest.raises(TransportError, match="serial reader failed"):
+        await transport.wait_failed()
+
+
+async def test_intentional_close_does_not_signal_terminal_failure() -> None:
+    class ClosingSerial:
+        def readline(self) -> bytes:
+            raise serial.SerialException("closed")
+
+    transport = SerialTransport("/dev/null")
+    transport._serial = ClosingSerial()  # type: ignore[assignment]
+    transport._loop = asyncio.get_running_loop()
+    transport._closing = True
+
+    transport._read_loop()
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(transport.wait_failed(), timeout=0.01)
 
 
 async def test_set_network_id_wrong_length(transport: SerialTransport) -> None:

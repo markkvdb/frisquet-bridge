@@ -51,6 +51,8 @@ class SerialTransport(Transport):
         self._loop: asyncio.AbstractEventLoop | None = None
         self._reader: threading.Thread | None = None
         self._closing = False
+        self._failure = asyncio.Event()
+        self._failure_error: TransportError | None = None
 
         self._cmd_lock = asyncio.Lock()
         self._pending: asyncio.Future[None] | None = None
@@ -62,6 +64,8 @@ class SerialTransport(Transport):
         self._loop = asyncio.get_running_loop()
         self._serial = await self._loop.run_in_executor(None, self._open_serial)
         self._closing = False
+        self._failure.clear()
+        self._failure_error = None
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
         log.info("serial_open", port=self._port, baud=self._baud)
@@ -87,8 +91,12 @@ class SerialTransport(Transport):
         while not self._closing:
             try:
                 raw = self._serial.readline()
-            except (serial.SerialException, OSError):  # pragma: no cover
+            except (serial.SerialException, OSError) as exc:
+                if self._closing:
+                    break
                 log.exception("serial_read_failed")
+                error = TransportError(f"serial reader failed: {exc}")
+                self._loop.call_soon_threadsafe(self._report_failure, error)
                 break
             if not raw:
                 continue
@@ -97,6 +105,18 @@ class SerialTransport(Transport):
                 if self._raw_recorder is not None:
                     self._raw_recorder.record_line("rx", line)
                 self._loop.call_soon_threadsafe(self._handle_line, line)
+
+    def _report_failure(self, error: TransportError) -> None:
+        if self._closing or self._failure.is_set():
+            return
+        self._failure_error = error
+        self._failure.set()
+        self._resolve_pending(error)
+
+    async def wait_failed(self) -> None:
+        await self._failure.wait()
+        assert self._failure_error is not None
+        raise self._failure_error
 
     def _handle_line(self, line: str) -> None:
         if line == "HB":

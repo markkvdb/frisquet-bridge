@@ -65,6 +65,10 @@ class Transport(abc.ABC):
         """Put the modem radio idle."""
 
     @abc.abstractmethod
+    async def wait_failed(self) -> None:
+        """Wait until the transport suffers an unrecoverable background failure."""
+
+    @abc.abstractmethod
     def subscribe(self) -> AbstractAsyncContextManager[asyncio.Queue[ReceivedFrame]]:
         """Register a queue receiving every RF frame for the block's duration.
 

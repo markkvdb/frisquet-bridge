@@ -1,10 +1,14 @@
 """Tests for service-level polling decisions."""
 
+import asyncio
 from pathlib import Path
+
+import pytest
 
 from frisquet_bridge.config import BridgeConfig, ZoneConfig
 from frisquet_bridge.model import BoilerData, ZoneSource
-from frisquet_bridge.service import _configure_zone_sources, _has_read_only_satellite_zone
+from frisquet_bridge.service import BridgeService, _configure_zone_sources, _has_read_only_satellite_zone
+from frisquet_bridge.transport.base import TransportError
 
 
 def _config(tmp_path: Path, *modes: str) -> BridgeConfig:
@@ -40,6 +44,28 @@ def test_configure_zone_sources_maps_connect_physical_and_virtual_owners(tmp_pat
     assert data.zones[1].source == ZoneSource.CONNECT
     assert data.zones[2].source == ZoneSource.SATELLITE
     assert data.zones[3].source == ZoneSource.VIRTUAL
+
+
+async def test_wait_for_stop_propagates_transport_failure() -> None:
+    service = BridgeService.__new__(BridgeService)
+    service._stop = asyncio.Event()
+
+    async def fail_transport() -> None:
+        raise TransportError("serial reader failed: disconnected")
+
+    with pytest.raises(TransportError, match="disconnected"):
+        await service._wait_for_stop_or_transport_failure(fail_transport())
+
+
+async def test_offline_publish_failure_does_not_replace_transport_failure() -> None:
+    service = BridgeService.__new__(BridgeService)
+    failure = TransportError("serial reader failed: disconnected")
+
+    class FailingAdapter:
+        async def publish_offline(self, _client: object) -> None:
+            raise RuntimeError("broker disconnected")
+
+    await service._publish_offline_preserving_failure(FailingAdapter(), object(), failure)
 
 
 def test_configure_zone_sources_maps_central_boiler_to_virtual_owner(tmp_path: Path) -> None:
