@@ -106,19 +106,24 @@ void emitRx(int16_t rssi, const uint8_t* frame, size_t frameLen) {
   Serial.println(line);
 }
 
-void emitOk(uint8_t seq) {
+void emitOk(uint32_t seq) {
   Serial.print(F("OK "));
   Serial.println(seq);
 }
 
-void emitErr(uint8_t seq, const char* reason) {
+void emitErr(uint32_t seq, const char* reason) {
   Serial.print(F("ERR "));
   Serial.print(seq);
   Serial.print(F(" "));
   Serial.println(reason);
 }
 
-void emitPong(uint8_t seq) {
+void emitUncorrelatedErr(const char* reason) {
+  Serial.print(F("ERR - "));
+  Serial.println(reason);
+}
+
+void emitPong(uint32_t seq) {
   Serial.print(F("PONG "));
   Serial.println(seq);
 }

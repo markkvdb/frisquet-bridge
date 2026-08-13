@@ -7,7 +7,7 @@ Line-based protocol over USB serial at **115200 baud**. Each line is terminated 
 Most host commands end with a **CRC8** (XOR of all preceding ASCII bytes, formatted as two lowercase hex digits):
 
 ```
-LISTEN aa
+LISTEN @7 5e
 ```
 
 Commands without a CRC field: none required for boot messages from the modem.
@@ -19,23 +19,35 @@ Commands without a CRC field: none required for boot messages from the modem.
 | `READY <name> <version>` | Sent once after boot and radio init |
 | `RX <rssi> <hex> <crc>` | Received RF frame. `rssi` is signed dBm. `hex` is the full 7-byte Frisquet metadata + payload (see below). |
 | `OK <seq>` | Command `seq` succeeded |
-| `ERR <seq> <reason>` | Command failed (`bad_crc`, `bad_hex`, `tx_fail`, `unknown`, `busy`) |
+| `ERR <seq> <reason>` | Correlated command failure (`bad_crc`, `bad_seq`, `bad_hex`, `bad_frame`, `tx_fail`, `unknown`) |
+| `ERR - <reason>` | Uncorrelated malformed input (`bad_crc`, `bad_seq`, `line_overflow`); never completes a pending host command |
 | `PONG <seq>` | Response to `PING` |
-| `INFO <key> <value>` | Response to `VERSION` (`INFO version 1.0.0`) |
+| `INFO <key> <value>` | Response to `VERSION` (`INFO version 1.1.0`) |
 | `HB` | Heartbeat every 30 s while in LISTEN mode |
 
 ## Host → Modem
 
 | Command | Description |
 |---------|-------------|
-| `NID <hex8> <crc>` | Set 4-byte RF sync word (network ID). Use the boiler network ID for normal traffic. `ffffffff` is useful for association/pairing traffic, but it is still a real sync word, not a wildcard. |
-| `TX <hex> <crc>` | Transmit a frame (see byte layout below). |
-| `LISTEN <crc>` | Enter continuous RX mode (promiscuous). |
-| `SLEEP <crc>` | Stop RX, radio idle. |
-| `PING <seq> <crc>` | Connectivity check |
-| `VERSION <crc>` | Request firmware version |
+| `NID @<seq> <hex8> <crc>` | Set 4-byte RF sync word (network ID). Use the boiler network ID for normal traffic. `ffffffff` is useful for association/pairing traffic, but it is still a real sync word, not a wildcard. |
+| `TX @<seq> <hex> <crc>` | Transmit a frame (see byte layout below). |
+| `LISTEN @<seq> <crc>` | Enter continuous RX mode (promiscuous). |
+| `SLEEP @<seq> <crc>` | Stop RX, radio idle. |
+| `PING @<seq> <crc>` | Connectivity check |
+| `VERSION @<seq> <crc>` | Request firmware version |
 
-`<seq>` is a decimal integer 0–255, echoed in `OK`/`ERR`/`PONG`.
+`@<seq>` is an unambiguous sequence token containing a decimal uint32 allocated
+from a randomized host-process starting point and incremented modulo 2³². It is
+present on every new-form command, covered by the CRC, and echoed in
+`OK`/`ERR`/`PONG`. The host accepts only a reply matching the pending sequence
+and expected response kind. Randomized 32-bit allocation makes collision with a
+buffered reply from an earlier process or wrap cycle negligibly likely.
+
+For firmware-first rollout compatibility, firmware 1.1 accepts legacy `NID`,
+`TX`, `LISTEN`, `SLEEP`, and `VERSION` forms without a sequence and replies with
+sequence 0. Legacy `PING <seq>` continues to echo its decimal sequence. Upgrade
+firmware before the host: the new host always sends sequenced forms and does not
+fall back to legacy commands.
 
 ## RF frame byte layout (TX and RX `hex` field)
 
@@ -60,8 +72,8 @@ On **RX**, the modem reconstructs the full hex line from RH headers + payload.
 
 ```
 # host sends (CRC computed by tool):
-NID 05d97f78 65
-LISTEN 09
+NID @0 05d97f78 35
+LISTEN @1 58
 
 # modem receives boiler traffic:
 RX -48 0e807e809c18010379e0001c... ee

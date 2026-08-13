@@ -27,7 +27,7 @@ RH_RF69 rf69(RFM69_CS, RFM69_INT);
 enum class Mode : uint8_t { Idle, Listen, Sleep };
 
 static Mode gMode = Mode::Idle;
-static uint8_t gSeq = 0;
+
 static uint32_t gLastHbMs = 0;
 static constexpr uint32_t kHeartbeatMs = 30000;
 
@@ -98,7 +98,7 @@ static void emitReceivedPacket() {
   ledRxPulse();
 }
 
-static bool handleTx(const char* hex, size_t hexLen, uint8_t seq) {
+static bool handleTx(const char* hex, size_t hexLen, uint32_t seq) {
   uint8_t buf[255];
   size_t bufLen = sizeof(buf);
   if (!protocol::parseHex(hex, hexLen, buf, &bufLen) || bufLen < 6) {
@@ -126,7 +126,7 @@ static bool handleTx(const char* hex, size_t hexLen, uint8_t seq) {
   return true;
 }
 
-static bool handleNid(const char* hex, size_t hexLen, uint8_t seq) {
+static bool handleNid(const char* hex, size_t hexLen, uint32_t seq) {
   uint8_t sync[4];
   size_t syncLen = sizeof(sync);
   if (!protocol::parseHex(hex, hexLen, sync, &syncLen) || syncLen != 4) {
@@ -136,6 +136,55 @@ static bool handleNid(const char* hex, size_t hexLen, uint8_t seq) {
   rf69.setSyncWords(sync, 4);
   protocol::emitOk(seq);
   return true;
+}
+
+static bool parseSequenceToken(const char* token, uint32_t* seq, const char** arguments) {
+  if (token == nullptr || token[0] != '@' || token[1] < '0' || token[1] > '9') {
+    return false;
+  }
+  uint32_t parsed = 0;
+  const char* cursor = token + 1;
+  while (*cursor >= '0' && *cursor <= '9') {
+    uint8_t digit = static_cast<uint8_t>(*cursor - '0');
+    if (parsed > (UINT32_MAX - digit) / 10U) {
+      return false;
+    }
+    parsed = parsed * 10U + digit;
+    cursor++;
+  }
+  if (*cursor != ' ' && *cursor != '\0') {
+    return false;
+  }
+  *seq = parsed;
+  *arguments = *cursor == ' ' ? cursor + 1 : cursor;
+  return true;
+}
+
+static bool extractSequenceBeforeCrc(const char* line, size_t len, uint32_t* seq) {
+  size_t crcSpace = len;
+  while (crcSpace > 0 && line[crcSpace - 1] != ' ') {
+    crcSpace--;
+  }
+  if (crcSpace == 0) {
+    return false;
+  }
+  const char* firstSpace = strchr(line, ' ');
+  if (firstSpace == nullptr || firstSpace + 1 >= line + crcSpace || firstSpace[1] != '@') {
+    return false;
+  }
+  char token[12];
+  size_t tokenLen = 0;
+  const char* cursor = firstSpace + 1;
+  while (cursor + tokenLen < line + crcSpace - 1 && cursor[tokenLen] != ' ') {
+    if (tokenLen + 1 >= sizeof(token)) {
+      return false;
+    }
+    token[tokenLen] = cursor[tokenLen];
+    tokenLen++;
+  }
+  token[tokenLen] = '\0';
+  const char* ignored = nullptr;
+  return parseSequenceToken(token, seq, &ignored) && ignored[0] == '\0';
 }
 
 static void dispatchLine(char* line, size_t len) {
@@ -154,7 +203,12 @@ static void dispatchLine(char* line, size_t len) {
   }
 
   if (!protocol::crc8Matches(line, len)) {
-    protocol::emitErr(gSeq, "bad_crc");
+    uint32_t seq = 0;
+    if (extractSequenceBeforeCrc(line, len, &seq)) {
+      protocol::emitErr(seq, "bad_crc");
+    } else {
+      protocol::emitUncorrelatedErr("bad_crc");
+    }
     return;
   }
 
@@ -168,19 +222,28 @@ static void dispatchLine(char* line, size_t len) {
     line[len] = '\0';
   }
 
-  uint8_t seq = 0;
+  uint32_t seq = 0;
+  char* firstSpace = strchr(line, ' ');
+  const char* arguments = nullptr;
+  bool sequenced = firstSpace != nullptr && firstSpace[1] == '@';
+  if (sequenced && !parseSequenceToken(firstSpace + 1, &seq, &arguments)) {
+    protocol::emitUncorrelatedErr("bad_seq");
+    return;
+  }
 
   if (strncmp(line, "NID ", 4) == 0) {
-    handleNid(line + 4, len - 4, seq);
+    const char* hex = arguments != nullptr ? arguments : firstSpace + 1;
+    handleNid(hex, strlen(hex), seq);
     return;
   }
 
   if (strncmp(line, "TX ", 3) == 0) {
-    handleTx(line + 3, len - 3, seq);
+    const char* hex = arguments != nullptr ? arguments : firstSpace + 1;
+    handleTx(hex, strlen(hex), seq);
     return;
   }
 
-  if (strcmp(line, "LISTEN") == 0) {
+  if (strcmp(line, "LISTEN") == 0 || (sequenced && strcmp(arguments, "") == 0 && strncmp(line, "LISTEN ", 7) == 0)) {
     gMode = Mode::Listen;
     rf69.setPromiscuous(true);
     gLastHbMs = millis();
@@ -188,19 +251,29 @@ static void dispatchLine(char* line, size_t len) {
     return;
   }
 
-  if (strcmp(line, "SLEEP") == 0) {
+  if (strcmp(line, "SLEEP") == 0 || (sequenced && strcmp(arguments, "") == 0 && strncmp(line, "SLEEP ", 6) == 0)) {
     gMode = Mode::Sleep;
     protocol::emitOk(seq);
     return;
   }
 
-  if (strncmp(line, "PING ", 5) == 0) {
-    seq = static_cast<uint8_t>(atoi(line + 5));
+  if ((sequenced && strncmp(line, "PING ", 5) == 0 && strcmp(arguments, "") == 0) ||
+      (!sequenced && strncmp(line, "PING ", 5) == 0)) {
+    if (!sequenced) {
+      char* end = nullptr;
+      unsigned long parsed = strtoul(line + 5, &end, 10);
+      if (end == line + 5 || *end != '\0' || static_cast<unsigned long>(static_cast<uint32_t>(parsed)) != parsed) {
+        protocol::emitUncorrelatedErr("bad_seq");
+        return;
+      }
+      seq = static_cast<uint32_t>(parsed);
+    }
     protocol::emitPong(seq);
     return;
   }
 
-  if (strcmp(line, "VERSION") == 0) {
+  if (strcmp(line, "VERSION") == 0 ||
+      (sequenced && strcmp(arguments, "") == 0 && strncmp(line, "VERSION ", 8) == 0)) {
     protocol::emitReady();
     protocol::emitInfo("version", protocol::kVersion);
     protocol::emitOk(seq);
@@ -226,7 +299,7 @@ static void pollSerial() {
     } else {
       // Overflow — discard line
       gLineLen = 0;
-      protocol::emitErr(0, "line_overflow");
+      protocol::emitUncorrelatedErr("line_overflow");
     }
   }
 }

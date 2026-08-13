@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import secrets
 import threading
 from collections.abc import AsyncIterator
 
@@ -55,7 +56,8 @@ class SerialTransport(Transport):
         self._failure_error: TransportError | None = None
 
         self._cmd_lock = asyncio.Lock()
-        self._pending: asyncio.Future[None] | None = None
+        self._pending: tuple[int, str, asyncio.Future[None]] | None = None
+        self._next_seq = secrets.randbits(32)
         self._subscribers: set[asyncio.Queue[ReceivedFrame]] = set()
 
     # -- lifecycle ---------------------------------------------------------
@@ -111,7 +113,9 @@ class SerialTransport(Transport):
             return
         self._failure_error = error
         self._failure.set()
-        self._resolve_pending(error)
+        pending = self._pending
+        if pending is not None:
+            self._resolve_pending(pending[0], pending[1], error)
 
     async def wait_failed(self) -> None:
         await self._failure.wait()
@@ -130,15 +134,24 @@ class SerialTransport(Transport):
             self._dispatch_rx(rx.rssi, rx.frame_hex)
             return
 
-        if OK_RE.match(line) or PONG_RE.match(line):
-            log.debug("modem_ack", line=line)
-            self._resolve_pending(None)
+        ok = OK_RE.match(line)
+        if ok:
+            self._resolve_pending(int(ok.group(1)), "OK", None)
+            return
+
+        pong = PONG_RE.match(line)
+        if pong:
+            self._resolve_pending(int(pong.group(1)), "PONG", None)
             return
 
         m = ERR_RE.match(line)
         if m:
             log.warning("modem_error", seq=m.group(1), reason=m.group(2))
-            self._resolve_pending(TransportError(f"modem error: {m.group(2)}"))
+            self._resolve_pending(
+                int(m.group(1)),
+                "ERR",
+                TransportError(f"modem error: {m.group(2)}"),
+            )
             return
 
         if READY_RE.match(line):
@@ -171,9 +184,17 @@ class SerialTransport(Transport):
         for queue in self._subscribers:
             queue.put_nowait(received)
 
-    def _resolve_pending(self, error: Exception | None) -> None:
-        fut = self._pending
-        if fut is None or fut.done():
+    def _resolve_pending(self, seq: int, kind: str, error: Exception | None) -> None:
+        pending = self._pending
+        if pending is None or pending[0] != seq:
+            log.debug("unmatched_modem_reply", seq=seq, kind=kind)
+            return
+        expected_kind = pending[1]
+        if error is None and kind != expected_kind:
+            log.debug("unexpected_modem_reply", seq=seq, kind=kind, expected=expected_kind)
+            return
+        fut = pending[2]
+        if fut.done():
             return
         if error is None:
             fut.set_result(None)
@@ -182,15 +203,19 @@ class SerialTransport(Transport):
 
     # -- commands ----------------------------------------------------------
 
-    async def _command(self, line: str) -> None:
+    async def _command(self, line: str, *, expected_kind: str = "OK") -> None:
         if self._serial is None:
             raise TransportError("transport not open")
         loop = asyncio.get_running_loop()
         async with self._cmd_lock:
+            seq = self._next_seq
+            self._next_seq = (seq + 1) & 0xFFFFFFFF
             fut: asyncio.Future[None] = loop.create_future()
-            self._pending = fut
+            self._pending = (seq, expected_kind, fut)
             try:
-                formatted = format_cmd(line)
+                command, separator, arguments = line.partition(" ")
+                sequenced = f"{command} @{seq}{separator}{arguments}"
+                formatted = format_cmd(sequenced)
                 if self._raw_recorder is not None:
                     self._raw_recorder.record_line("tx", formatted.strip())
                 log.debug("modem_command", command=line.split(" ", 1)[0])
@@ -200,7 +225,11 @@ class SerialTransport(Transport):
                 log.warning("modem_command_timeout", command=line.split(" ", 1)[0], timeout=self._command_timeout)
                 raise TransportError(f"timeout waiting for ack to {line!r}") from exc
             finally:
-                self._pending = None
+                self._clear_pending(seq, expected_kind, fut)
+
+    def _clear_pending(self, seq: int, expected_kind: str, fut: asyncio.Future[None]) -> None:
+        if self._pending == (seq, expected_kind, fut):
+            self._pending = None
 
     def _write(self, text: str) -> None:
         assert self._serial is not None
@@ -226,6 +255,9 @@ class SerialTransport(Transport):
             payload_len=len(frame.payload),
         )
         await self._command(f"TX {frame.encode().hex()}")
+
+    async def ping(self) -> None:
+        await self._command("PING", expected_kind="PONG")
 
     async def listen(self) -> None:
         await self._command("LISTEN")

@@ -8,7 +8,7 @@ import pytest
 import serial
 
 from frisquet_bridge.frame import Frame
-from frisquet_bridge.protocol import crc8
+from frisquet_bridge.protocol import crc8, format_cmd
 from frisquet_bridge.transport.base import TransportError
 from frisquet_bridge.transport.serial import SerialTransport
 
@@ -67,7 +67,7 @@ def test_handle_line_ignores_invalid_hex(transport: SerialTransport) -> None:
 def test_handle_line_ok_resolves_pending(transport: SerialTransport) -> None:
     loop = asyncio.new_event_loop()
     fut = loop.create_future()
-    transport._pending = fut
+    transport._pending = (1, "OK", fut)
 
     transport._handle_line("OK 1")
 
@@ -79,7 +79,7 @@ def test_handle_line_ok_resolves_pending(transport: SerialTransport) -> None:
 def test_handle_line_err_resolves_pending(transport: SerialTransport) -> None:
     loop = asyncio.new_event_loop()
     fut = loop.create_future()
-    transport._pending = fut
+    transport._pending = (1, "OK", fut)
 
     transport._handle_line("ERR 1 bad_crc")
 
@@ -107,7 +107,7 @@ async def test_reader_failure_fails_pending_command_and_signals_terminal_failure
     transport._serial = FailingSerial()  # type: ignore[assignment]
     transport._loop = asyncio.get_running_loop()
     pending = asyncio.get_running_loop().create_future()
-    transport._pending = pending
+    transport._pending = (7, "OK", pending)
 
     transport._read_loop()
     with pytest.raises(TransportError, match="serial reader failed"):
@@ -139,3 +139,87 @@ async def test_set_network_id_wrong_length(transport: SerialTransport) -> None:
 async def test_command_when_not_open_raises(transport: SerialTransport) -> None:
     with pytest.raises(TransportError, match="not open"):
         await transport.listen()
+
+
+def test_stale_and_wrong_kind_replies_do_not_resolve_pending(transport: SerialTransport) -> None:
+    loop = asyncio.new_event_loop()
+    fut = loop.create_future()
+    transport._pending = (42, "OK", fut)
+
+    transport._handle_line("OK 41")
+    transport._handle_line("ERR 41 delayed")
+    transport._handle_line("PONG 42")
+
+    assert not fut.done()
+    transport._handle_line("OK 42")
+    assert fut.result() is None
+    loop.close()
+
+
+def test_matching_pong_resolves_ping_but_ok_does_not(transport: SerialTransport) -> None:
+    loop = asyncio.new_event_loop()
+    fut = loop.create_future()
+    transport._pending = (99, "PONG", fut)
+
+    transport._handle_line("OK 99")
+    assert not fut.done()
+    transport._handle_line("PONG 99")
+
+    assert fut.result() is None
+    loop.close()
+
+
+async def test_commands_allocate_uint32_sequences_and_wrap(transport: SerialTransport) -> None:
+    loop = asyncio.get_running_loop()
+
+    class RecordingSerial:
+        def __init__(self) -> None:
+            self.writes: list[str] = []
+
+        def write(self, data: bytes) -> None:
+            text = data.decode("ascii")
+            self.writes.append(text)
+            seq = int(text.split()[1].removeprefix("@"))
+            loop.call_soon_threadsafe(transport._handle_line, f"OK {seq}")
+
+        def flush(self) -> None:
+            pass
+
+    serial_port = RecordingSerial()
+    transport._serial = serial_port  # type: ignore[assignment]
+    transport._next_seq = 0xFFFFFFFF
+
+    await transport.listen()
+    await transport.sleep()
+
+    assert serial_port.writes[0].startswith("LISTEN @4294967295 ")
+    assert serial_port.writes[1].startswith("SLEEP @0 ")
+    assert serial_port.writes[0] == format_cmd("LISTEN @4294967295")
+
+
+async def test_ping_sends_sequence_and_waits_for_matching_pong(transport: SerialTransport) -> None:
+    loop = asyncio.get_running_loop()
+
+    class PongSerial:
+        def write(self, data: bytes) -> None:
+            seq = int(data.decode("ascii").split()[1].removeprefix("@"))
+            loop.call_soon_threadsafe(transport._handle_line, f"PONG {seq}")
+
+        def flush(self) -> None:
+            pass
+
+    transport._serial = PongSerial()  # type: ignore[assignment]
+    transport._next_seq = 1234
+
+    await transport.ping()
+
+
+async def test_timeout_cleanup_does_not_clear_newer_pending(transport: SerialTransport) -> None:
+    loop = asyncio.get_running_loop()
+    old = loop.create_future()
+    newer = loop.create_future()
+    transport._pending = (8, "OK", newer)
+
+    transport._clear_pending(7, "OK", old)
+
+    assert transport._pending == (8, "OK", newer)

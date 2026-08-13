@@ -5,7 +5,7 @@
 namespace protocol {
 
 static constexpr char kName[] = "frisquet-bridge-fw";
-static constexpr char kVersion[] = "1.0.0";
+static constexpr char kVersion[] = "1.1.0";
 
 uint8_t crc8(const uint8_t* data, size_t len);
 bool crc8Matches(const char* line, size_t lineLen);
@@ -15,9 +15,10 @@ void appendHexByte(uint8_t value, char* out, size_t* pos, size_t maxLen);
 
 void emitReady();
 void emitRx(int16_t rssi, const uint8_t* frame, size_t frameLen);
-void emitOk(uint8_t seq);
-void emitErr(uint8_t seq, const char* reason);
-void emitPong(uint8_t seq);
+void emitOk(uint32_t seq);
+void emitErr(uint32_t seq, const char* reason);
+void emitUncorrelatedErr(const char* reason);
+void emitPong(uint32_t seq);
 void emitInfo(const char* key, const char* value);
 void emitHeartbeat();
 

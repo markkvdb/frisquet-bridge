@@ -21,6 +21,11 @@ def test_format_cmd_appends_crc_and_newline() -> None:
     assert verify_crc(line.strip())
 
 
+def test_sequence_is_covered_by_command_crc() -> None:
+    assert format_cmd("TX @17 deadbeef") != format_cmd("TX @18 deadbeef")
+    assert verify_crc(format_cmd("TX @17 deadbeef").strip())
+
+
 def test_verify_crc_rejects_bad_crc() -> None:
     assert verify_crc("PING 1 ff") is False
 
