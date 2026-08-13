@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import contextlib
 import struct
+from collections.abc import Awaitable, Callable
+from typing import TypeVar
 
 import structlog
 
 from frisquet_bridge.climate import resolve_zone_intent
-from frisquet_bridge.connect.client import FrisquetClient
+from frisquet_bridge.connect.client import AddressNotFound, FrisquetClient, RequestTimeout
 from frisquet_bridge.connect.codec import encode_temp8, encode_temp16
 from frisquet_bridge.connect.decode import (
     ADDR_CONSUMPTION,
@@ -29,7 +30,8 @@ from frisquet_bridge.connect.decode import (
     memory_address,
 )
 from frisquet_bridge.frame import ADDR_SATELLITE_Z1, MSG_INIT, MSG_SONDE_INIT
-from frisquet_bridge.model import SCHEDULE_DAYS, BoilerData, DhwMode, ZoneMode, ZoneState
+from frisquet_bridge.model import SCHEDULE_DAYS, BoilerData, DhwMode, RfHealth, ZoneMode, ZoneState
+from frisquet_bridge.transport.base import TransportError
 
 ZONE_ADDR = ADDR_ZONE_CONFIG
 SONDE_TEMP_PREFIX = bytes((0x9C, 0x54, 0x00, 0x04, 0xA0, 0x29, 0x00, 0x01, 0x02))
@@ -62,6 +64,7 @@ def _zone_mode_options(mode: ZoneMode, *, auto_comfort: bool, override: bool, bo
 ZONE_WRITE_REPEATS = 6
 ZONE_WRITE_INTERVAL = 1.5
 log = structlog.get_logger(__name__)
+_T = TypeVar("_T")
 
 
 def _zone_id(zone: int) -> int:
@@ -92,25 +95,128 @@ class BoilerOps:
     def _addr(self, base: int) -> int:
         return memory_address(base, boiler_addr=self._boiler_addr)
 
+    async def _tracked(
+        self,
+        data: BoilerData,
+        operation: str,
+        freshness_seconds: float,
+        fn: Callable[[], Awaitable[_T]],
+        *,
+        zone: int | None = None,
+        response_rssi: bool = True,
+    ) -> _T:
+        health: RfHealth = data.rf_health(operation, freshness_seconds=freshness_seconds, zone=zone)
+        recorded_attempts = 0
+        successful_rssi: int | None = None
+        received_success = False
+
+        def record_attempt(outcome: str, rssi: int | None) -> None:
+            nonlocal received_success, recorded_attempts, successful_rssi
+            if outcome == "success":
+                # Defer success until the operation's decoder also accepts the
+                # payload. A malformed response is an operation failure, not a
+                # success followed by a second synthetic attempt.
+                received_success = True
+                successful_rssi = rssi
+            elif outcome == "nack":
+                recorded_attempts += 1
+                health.record_nack()
+            elif outcome == "timeout":
+                recorded_attempts += 1
+                health.record_timeout()
+            elif outcome == "transport_failure":
+                recorded_attempts += 1
+                health.record_transport_failure()
+
+        callback_token = self._client.set_attempt_outcome_callback(record_attempt)
+        try:
+            result = await fn()
+        except AddressNotFound:
+            if recorded_attempts == 0:
+                health.record_nack()
+            raise
+        except RequestTimeout:
+            if recorded_attempts == 0:
+                health.record_timeout()
+            raise
+        except TransportError:
+            if recorded_attempts == 0:
+                health.record_transport_failure()
+            raise
+        except Exception:
+            health.record_other_failure()
+            raise
+        else:
+            health.record_success(rssi=successful_rssi if received_success and response_rssi else None)
+        finally:
+            self._client.reset_attempt_outcome_callback(callback_token)
+        return result
+
+    async def _tracked_read(
+        self,
+        data: BoilerData,
+        operation: str,
+        freshness_seconds: float,
+        address: int,
+        size: int,
+        decode: Callable[[bytes, BoilerData], None],
+        **kwargs: object,
+    ) -> None:
+        async def read_and_decode() -> None:
+            payload = await self._client.read_memory(address, size, **kwargs)
+            decode(payload, data)
+
+        await self._tracked(data, operation, freshness_seconds, read_and_decode)
+
     async def read_sensors(self, data: BoilerData) -> None:
-        payload = await self._client.read_memory(self._addr(ADDR_SENSORS), 0x001C)
-        decode_sensors(payload, data)
+        await self._tracked_read(
+            data,
+            "connect_sensors",
+            90.0,
+            self._addr(ADDR_SENSORS),
+            0x001C,
+            decode_sensors,
+        )
 
     async def read_consumption(self, data: BoilerData) -> None:
-        payload = await self._client.read_memory(self._addr(ADDR_CONSUMPTION), 0x001C)
-        decode_consumption(payload, data)
+        await self._tracked_read(
+            data,
+            "connect_consumption",
+            7200.0,
+            self._addr(ADDR_CONSUMPTION),
+            0x001C,
+            decode_consumption,
+        )
 
     async def read_daily_consumption(self, data: BoilerData) -> None:
-        payload = await self._client.read_memory(self._addr(ADDR_DAILY_CONSUMPTION), 0x001C)
-        decode_daily_consumption(payload, data)
+        await self._tracked_read(
+            data,
+            "connect_daily_consumption",
+            7200.0,
+            self._addr(ADDR_DAILY_CONSUMPTION),
+            0x001C,
+            decode_daily_consumption,
+        )
 
     async def read_dhw_mode(self, data: BoilerData) -> None:
-        payload = await self._client.read_memory(self._addr(ADDR_DHW_MODE), 0x0001)
-        decode_dhw_mode(payload, data)
+        await self._tracked_read(
+            data,
+            "connect_dhw_mode",
+            7200.0,
+            self._addr(ADDR_DHW_MODE),
+            0x0001,
+            decode_dhw_mode,
+        )
 
     async def read_clock(self, data: BoilerData) -> None:
-        payload = await self._client.read_memory(self._addr(ADDR_DATE), 0x0004)
-        decode_clock(payload, data)
+        await self._tracked_read(
+            data,
+            "connect_clock",
+            7200.0,
+            self._addr(ADDR_DATE),
+            0x0004,
+            decode_clock,
+        )
 
     async def read_satellite_info(
         self,
@@ -122,13 +228,16 @@ class BoilerOps:
         # The old captured INIT body contained 0x010d, which is an ambient
         # temperature of 26.9°C, not part of the address. Replaying it here
         # wrote 26.9°C to 0xa02f on every poll. Satellite info is read-only.
-        payload = await self._client.read_memory(
+        await self._tracked_read(
+            data,
+            "connect_satellite_info",
+            1200.0,
             self._addr(ADDR_SATELLITE_INFO),
             0x0015,
+            decode_satellite_init_response,
             timeout=timeout,
             retries=retries,
         )
-        decode_satellite_init_response(payload, data)
         log.debug("satellite_info_read")
 
     async def ensure_zone_metadata(self, zone: int, data: BoilerData) -> None:
@@ -145,7 +254,12 @@ class BoilerOps:
         raw = (mode.byte & 0x7E) | data.boiler.dhw_frame_bits
         body = struct.pack(">HHHHB", self._addr(ADDR_DHW_MODE), 1, self._addr(ADDR_DHW_MODE), 1, 2)
         body += bytes((0x00, raw))
-        await self._client.request(control=0x01, msg_type=MSG_INIT, payload=body)
+        await self._tracked(
+            data,
+            "connect_dhw_write",
+            300.0,
+            lambda: self._client.request(control=0x01, msg_type=MSG_INIT, payload=body),
+        )
         data.boiler.dhw_mode = mode
         log.info("dhw_mode_written", mode=mode.value, raw=f"0x{raw:02x}")
 
@@ -206,12 +320,21 @@ class BoilerOps:
         # forget and re-send a short burst for reliability, like the official
         # app. The satellite's 0xa154 rebroadcast (decoded by PassiveMirror)
         # is what confirms the change.
+        health = data.rf_health(f"connect_zone{zone}_write", freshness_seconds=1200.0, zone=zone)
+
+        def record_send(outcome: str, rssi: int | None) -> None:
+            if outcome == "success":
+                health.record_success(rssi=rssi)
+            else:
+                health.record_transport_failure()
+
         await self._client.send_oneway(
             control=_zone_id(zone),
             msg_type=MSG_INIT,
             payload=payload,
             repeats=ZONE_WRITE_REPEATS,
             interval=ZONE_WRITE_INTERVAL,
+            on_attempt_outcome=record_send,
         )
         zs.mode = mode
         zs.mode_options = opts
@@ -286,11 +409,16 @@ class BoilerOps:
     async def write_outside_temperature(self, data: BoilerData, temperature: float) -> None:
         temp = max(-30.0, min(80.0, round(temperature * 10) / 10))
         body = SONDE_TEMP_PREFIX + encode_temp16(temp)
-        await self._client.request(
-            control=0x01,
-            msg_type=MSG_INIT,
-            payload=body,
-            from_addr=0x20,
+        await self._tracked(
+            data,
+            "sonde_outside_temperature",
+            1200.0,
+            lambda: self._client.request(
+                control=0x01,
+                msg_type=MSG_INIT,
+                payload=body,
+                from_addr=0x20,
+            ),
         )
         data.sonde.outside_temperature = temp
         log.info("outside_temperature_written", temperature=temp)
@@ -315,9 +443,17 @@ class BoilerOps:
         write_addr = self._addr(ADDR_SATELLITE_CONSIGNE) + 0x0005 * (zone - 1)
         body = struct.pack(">HHHHB", self._addr(ADDR_SATELLITE_INFO), 0x0015, write_addr, 0x0004, 0x08)
         body += encode_temp16(ambient) + encode_temp16(setpoint) + bytes((0x00, mode_byte)) + struct.pack(">H", 0x0000)
-        response = await self._client.request(control=0x01, msg_type=MSG_INIT, payload=body)
-        with contextlib.suppress(ValueError):
+        async def request_and_decode() -> None:
+            response = await self._client.request(control=0x01, msg_type=MSG_INIT, payload=body)
             decode_satellite_init_response(response.payload, data)
+
+        await self._tracked(
+            data,
+            f"satellite_z{zone}_consigne",
+            1200.0,
+            request_and_decode,
+            zone=zone,
+        )
         log.info(
             "zone_consigne_sent",
             zone=zone,

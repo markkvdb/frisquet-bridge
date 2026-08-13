@@ -89,6 +89,7 @@ _LABELS: dict[str, dict[str, str]] = {
         "zone_reported_ambient": "Zone {zone} reported room temperature",
         "zone_flow_temperature": "Zone {zone} flow temperature",
         "zone_flow_setpoint_temperature": "Zone {zone} flow setpoint temperature",
+        "rf_operation": "RF {operation}",
     },
     "fr": {
         "dhw_temperature": "Chaudière température ECS",
@@ -116,6 +117,7 @@ _LABELS: dict[str, dict[str, str]] = {
         "zone_reported_ambient": "Zone {zone} température ambiante déclarée",
         "zone_flow_temperature": "Zone {zone} température départ",
         "zone_flow_setpoint_temperature": "Zone {zone} température consigne départ",
+        "rf_operation": "RF {operation}",
     },
 }
 
@@ -519,6 +521,25 @@ class MqttAdapter:
                 count += 1
         return count
 
+    async def _publish_rf_discovery(self, client: aiomqtt.Client) -> int:
+        count = 0
+        for operation in sorted(self._data.rf_operations):
+            entity_id = f"rf_{operation}"
+            topic = self._topic(f"diagnostics/rf/{operation}")
+            payload = {
+                "name": self._label("rf_operation", operation=operation.replace("_", " ")),
+                "unique_id": f"{DEVICE_ID}_{entity_id}",
+                "state_topic": topic,
+                "value_template": "{{ value_json.state }}",
+                "json_attributes_topic": topic,
+                "entity_category": "diagnostic",
+                "device": self._device_block(),
+            }
+            self._add_availability(payload)
+            if await self._publish_discovery_payload(client, "sensor", entity_id, payload):
+                count += 1
+        return count
+
     async def publish_discovery(self, client: aiomqtt.Client) -> None:
         specs = list(BOILER_SENSOR_ENTITIES) if self._boiler_entities_enabled() else []
         if self._boiler_entities_enabled():
@@ -622,6 +643,7 @@ class MqttAdapter:
                 await client.publish(self._discovery_topic(component, entity_id), "", retain=True)
             self._retired_cleared = True
 
+        published_count += await self._publish_rf_discovery(client)
         avail = self.availability_topic()
         await client.publish(avail, "online", retain=True)
         log.info("mqtt_discovery_published", entity_count=published_count, availability_topic=avail)
@@ -688,6 +710,32 @@ class MqttAdapter:
             if value is not None:
                 await client.publish(self._topic(suffix), value, retain=True)
                 published_count += 1
+        for operation, health in sorted(self._data.rf_operations.items()):
+            diagnostic: dict[str, object] = {
+                "operation": operation,
+                "state": health.state,
+                "fresh": health.is_fresh,
+                "attempts": health.attempts,
+                "successes": health.successes,
+                "nacks": health.nacks,
+                "timeouts": health.timeouts,
+                "transport_failures": health.transport_failures,
+                "consecutive_failures": health.consecutive_failures,
+                "last_rssi": health.last_rssi,
+            }
+            if health.last_success is not None:
+                diagnostic["last_success"] = health.last_success
+            if health.other_failures:
+                diagnostic["other_failures"] = health.other_failures
+            if health.zone is not None:
+                diagnostic["zone"] = health.zone
+                diagnostic["source"] = self._data.zones[health.zone].source.value
+            await client.publish(
+                self._topic(f"diagnostics/rf/{operation}"),
+                json.dumps(diagnostic, sort_keys=True),
+                retain=True,
+            )
+            published_count += 1
         if self._boiler_entities_enabled():
             dhw_mode = self._visible_dhw_mode()
             if dhw_mode != self._last_published_dhw_mode:

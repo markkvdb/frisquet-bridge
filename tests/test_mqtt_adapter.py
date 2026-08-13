@@ -10,7 +10,7 @@ import pytest
 
 from frisquet_bridge.climate import HVAC_AUTO, PRESET_COMFORT
 from frisquet_bridge.config import BridgeConfig, ConnectConfig, DeviceIdentity, ZoneConfig
-from frisquet_bridge.model import BoilerData, BoilerStatus, DhwMode, ZoneMode
+from frisquet_bridge.model import BoilerData, BoilerStatus, DhwMode, ZoneMode, ZoneSource
 from frisquet_bridge.mqtt.adapter import MqttAdapter
 
 
@@ -500,6 +500,50 @@ async def test_publish_state_includes_boiler_status(adapter: tuple[MqttAdapter, 
     await mqtt.publish_state(client)  # type: ignore[arg-type]
 
     assert ("frisquet/boiler/status", "Standby", True) in client.published
+
+
+async def test_rf_diagnostics_publish_independent_operation_health_and_zone_source(tmp_path: Path) -> None:
+    cfg = BridgeConfig(path=tmp_path / "config.toml", network_id=bytes.fromhex("05d97f78"), boiler_addr=0x80)
+    data = BoilerData()
+    data.zones[1].source = ZoneSource.VIRTUAL
+    sensors = data.rf_health("connect_sensors", freshness_seconds=60.0)
+    sensors.record_success(rssi=-54)
+    clock = data.rf_health("connect_clock", freshness_seconds=3600.0)
+    clock.record_timeout()
+    zone = data.rf_health("satellite_z1_consigne", freshness_seconds=1200.0, zone=1)
+    zone.record_transport_failure()
+    mqtt = MqttAdapter(cfg, data, None)
+    client = FakeMqttClient()
+
+    await mqtt.publish_discovery(client)  # type: ignore[arg-type]
+    await mqtt.publish_state(client)  # type: ignore[arg-type]
+
+    payloads = {topic: payload for topic, payload, _retain in client.published}
+    discovery = json.loads(payloads["homeassistant/sensor/frisquet_bridge/rf_connect_sensors/config"])
+    assert discovery["entity_category"] == "diagnostic"
+    assert discovery["json_attributes_topic"] == "frisquet/diagnostics/rf/connect_sensors"
+
+    sensors_state = json.loads(payloads["frisquet/diagnostics/rf/connect_sensors"])
+    last_success = sensors_state.pop("last_success")
+    assert last_success.endswith("+00:00")
+    assert sensors_state == {
+        "attempts": 1,
+        "consecutive_failures": 0,
+        "fresh": True,
+        "last_rssi": -54,
+        "nacks": 0,
+        "operation": "connect_sensors",
+        "state": "healthy",
+        "successes": 1,
+        "timeouts": 0,
+        "transport_failures": 0,
+    }
+    clock_state = json.loads(payloads["frisquet/diagnostics/rf/connect_clock"])
+    assert clock_state["state"] == "unavailable"
+    assert clock_state["timeouts"] == 1
+    zone_state = json.loads(payloads["frisquet/diagnostics/rf/satellite_z1_consigne"])
+    assert zone_state["zone"] == 1
+    assert zone_state["source"] == "virtual"
 
 
 async def test_publish_offline_sets_retained_availability(adapter: tuple[MqttAdapter, BoilerData, FakeOps]) -> None:

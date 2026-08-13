@@ -5,10 +5,28 @@ from pathlib import Path
 
 import pytest
 
-from frisquet_bridge.config import BridgeConfig, ZoneConfig
+from frisquet_bridge.config import BridgeConfig, ConnectConfig, DeviceIdentity, ZoneConfig
 from frisquet_bridge.model import BoilerData, ZoneSource
-from frisquet_bridge.service import BridgeService, _configure_zone_sources, _has_read_only_satellite_zone
+from frisquet_bridge.service import BridgeService, _configure_rf_diagnostics, _configure_zone_sources, _has_read_only_satellite_zone
 from frisquet_bridge.transport.base import TransportError
+
+
+async def test_diagnostics_loop_republishes_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    published = 0
+
+    class Adapter:
+        async def publish_state(self, _client: object) -> None:
+            nonlocal published
+            published += 1
+
+    async def one_sleep(_seconds: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", one_sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await BridgeService._publish_diagnostics(Adapter(), object(), interval=30.0)  # type: ignore[arg-type]
+
+    assert published == 1
 
 
 def _config(tmp_path: Path, *modes: str) -> BridgeConfig:
@@ -75,3 +93,24 @@ def test_configure_zone_sources_maps_central_boiler_to_virtual_owner(tmp_path: P
     _configure_zone_sources(cfg, data)
 
     assert data.zones[1].source == ZoneSource.VIRTUAL
+
+
+def test_rf_diagnostics_skip_one_shot_satellite_info_and_disabled_zone(tmp_path: Path) -> None:
+    cfg = _config(tmp_path, "disabled", "virtual_satellite", "disabled")
+    cfg.connect = ConnectConfig(mode="full", identity=DeviceIdentity(association_id=1, request_id=1))
+    data = BoilerData()
+
+    _configure_rf_diagnostics(cfg, data)
+
+    assert "connect_satellite_info" not in data.rf_operations
+    assert "connect_zone1_write" not in data.rf_operations
+
+
+def test_rf_diagnostics_include_recurring_physical_satellite_info(tmp_path: Path) -> None:
+    cfg = _config(tmp_path, "satellite", "disabled", "disabled")
+    cfg.connect = ConnectConfig(mode="read", identity=DeviceIdentity(association_id=1, request_id=1))
+    data = BoilerData()
+
+    _configure_rf_diagnostics(cfg, data)
+
+    assert "connect_satellite_info" in data.rf_operations

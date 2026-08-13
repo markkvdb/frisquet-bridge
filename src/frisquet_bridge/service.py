@@ -45,6 +45,33 @@ def _configure_zone_sources(cfg: BridgeConfig, data: BoilerData) -> None:
             zone_state.source = ZoneSource.CONNECT
 
 
+def _configure_rf_diagnostics(cfg: BridgeConfig, data: BoilerData) -> None:
+    if cfg.connect_reads_enabled:
+        for operation, freshness in (
+            ("connect_sensors", 90.0),
+            ("connect_consumption", 7200.0),
+            ("connect_daily_consumption", 7200.0),
+            ("connect_dhw_mode", 7200.0),
+            ("connect_clock", 7200.0),
+        ):
+            data.rf_health(operation, freshness_seconds=freshness)
+        enabled_zones = tuple(zone for zone in (1, 2, 3) if cfg.zone_enabled(zone))
+        if _has_read_only_satellite_zone(cfg, enabled_zones):
+            data.rf_health("connect_satellite_info", freshness_seconds=1200.0)
+    if cfg.connect_writes_enabled:
+        data.rf_health("connect_dhw_write", freshness_seconds=300.0)
+        for zone in (1, 2, 3):
+            zone_cfg = cfg.zone(zone)
+            if zone_cfg is not None and zone_cfg.enabled and not zone_cfg.uses_virtual_satellite and not zone_cfg.is_read_only_satellite:
+                data.rf_health(f"connect_zone{zone}_write", freshness_seconds=1200.0, zone=zone)
+    if cfg.sonde is not None and cfg.sonde.enabled:
+        data.rf_health("sonde_outside_temperature", freshness_seconds=1200.0)
+    for zone in (1, 2, 3):
+        zone_cfg = cfg.zone(zone)
+        if zone_cfg is not None and zone_cfg.uses_virtual_satellite:
+            data.rf_health(f"satellite_z{zone}_consigne", freshness_seconds=1200.0, zone=zone)
+
+
 class BridgeService:
     def __init__(self, cfg: BridgeConfig, *, raw_recorder: RawMessageRecorder | None = None) -> None:
         self.cfg = cfg
@@ -55,6 +82,13 @@ class BridgeService:
     def stop(self) -> None:
         log.info("service_stop_requested")
         self._stop.set()
+
+    @staticmethod
+    async def _publish_diagnostics(adapter: MqttAdapter, client: aiomqtt.Client, *, interval: float = 30.0) -> None:
+        """Republish diagnostics so freshness can transition without RF traffic."""
+        while True:
+            await adapter.publish_state(client)
+            await asyncio.sleep(interval)
 
     async def run(self) -> None:
         log.info(
@@ -132,6 +166,7 @@ class BridgeService:
 
             enabled_zones = tuple(zone for zone in (1, 2, 3) if self.cfg.zone_enabled(zone))
             _configure_zone_sources(self.cfg, self.data)
+            _configure_rf_diagnostics(self.cfg, self.data)
 
             virtual_satellites: dict[int, VirtualSatellite] = {
                 zone_number: VirtualSatellite(
@@ -206,12 +241,18 @@ class BridgeService:
                     return
                 await adapter.run(mqtt_client)
 
+            async def diagnostics_loop() -> None:
+                if adapter is None or mqtt_client is None:
+                    return
+                await self._publish_diagnostics(adapter, mqtt_client)
+
             tasks = [
                 asyncio.create_task(scheduler.run(), name="scheduler"),
                 asyncio.create_task(rf_loop(), name="rf"),
             ]
             if adapter is not None:
                 tasks.append(asyncio.create_task(mqtt_loop(), name="mqtt"))
+                tasks.append(asyncio.create_task(diagnostics_loop(), name="diagnostics"))
             for zone_number, satellite in virtual_satellites.items():
                 tasks.append(asyncio.create_task(satellite.run(), name=f"satellite_z{zone_number}"))
             for task in tasks:

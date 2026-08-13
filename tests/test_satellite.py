@@ -8,6 +8,7 @@ from frisquet_bridge.connect.state import ProtocolState
 from frisquet_bridge.frame import ADDR_SATELLITE_Z1
 from frisquet_bridge.model import BoilerData, ZoneMode
 from frisquet_bridge.satellite import VirtualSatellite
+from frisquet_bridge.transport.base import TransportError
 from tests.helpers import FakeTransport
 
 _SATELLITE_INFO = bytes.fromhex(
@@ -49,3 +50,27 @@ async def test_send_now_emits_consigne_when_ready() -> None:
     assert sent.payload[:9].hex() == "a0290015a02f000408"
     # ambient 20.0 and active setpoint 19.0 (reduced) encoded as temperature16.
     assert sent.payload[9:13].hex() == "00c800be"
+
+
+async def test_send_failure_publishes_updated_rf_health() -> None:
+    transport = FakeTransport(send_raises=TransportError("serial offline"))
+    data = BoilerData()
+    zs = data.zones[1]
+    zs.mode = ZoneMode.AUTO
+    zs.auto_comfort = False
+    zs.reduced_temperature = 19.0
+    zs.reported_ambient = 20.0
+    updates = 0
+
+    async def on_update() -> None:
+        nonlocal updates
+        updates += 1
+
+    state = ProtocolState(network_id=bytes.fromhex("05d97f78"), association_id=0xC0, request_id=0x6C)
+    client = FrisquetClient(transport, state, self_addr=ADDR_SATELLITE_Z1)
+    ops = BoilerOps(client, boiler_addr=0x80)
+    satellite = VirtualSatellite(1, ops, data, on_update=on_update)
+
+    assert await satellite.send_now() is False
+    assert updates == 1
+    assert data.rf_operations["satellite_z1_consigne"].transport_failures == 3

@@ -6,7 +6,10 @@ These dataclasses are populated by the protocol layer and observed by adapters
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 
 # Sentinel the boiler uses for "outside temperature not available".
@@ -225,10 +228,80 @@ class SondeState:
 
 
 @dataclass
+class RfHealth:
+    """Runtime RF outcome counters and freshness for one logical operation."""
+
+    freshness_seconds: float
+    zone: int | None = None
+    attempts: int = 0
+    successes: int = 0
+    nacks: int = 0
+    timeouts: int = 0
+    transport_failures: int = 0
+    other_failures: int = 0
+    consecutive_failures: int = 0
+    last_rssi: int | None = None
+    last_success: str | None = None
+    _last_success_monotonic: float | None = None
+    clock: Callable[[], float] = field(default=time.monotonic, repr=False, compare=False)
+
+    @property
+    def is_fresh(self) -> bool:
+        return (
+            self._last_success_monotonic is not None
+            and self.clock() - self._last_success_monotonic <= self.freshness_seconds
+        )
+
+    @property
+    def state(self) -> str:
+        if self._last_success_monotonic is None:
+            return "unavailable"
+        if not self.is_fresh:
+            return "stale"
+        if self.consecutive_failures:
+            return "degraded"
+        return "healthy"
+
+    def record_success(self, *, rssi: int | None = None) -> None:
+        self.attempts += 1
+        self.successes += 1
+        self.consecutive_failures = 0
+        self._last_success_monotonic = self.clock()
+        self.last_success = datetime.now(UTC).isoformat()
+        if rssi is not None:
+            self.last_rssi = rssi
+
+    def record_nack(self) -> None:
+        self._record_failure("nacks")
+
+    def record_timeout(self) -> None:
+        self._record_failure("timeouts")
+
+    def record_transport_failure(self) -> None:
+        self._record_failure("transport_failures")
+
+    def record_other_failure(self) -> None:
+        self._record_failure("other_failures")
+
+    def _record_failure(self, counter: str) -> None:
+        self.attempts += 1
+        setattr(self, counter, getattr(self, counter) + 1)
+        self.consecutive_failures += 1
+
+
+@dataclass
 class BoilerData:
     """Aggregate state for the whole installation."""
 
     boiler: BoilerState = field(default_factory=BoilerState)
     zones: dict[int, ZoneState] = field(default_factory=lambda: {n: ZoneState(zone=n) for n in (1, 2, 3)})
     sonde: SondeState = field(default_factory=SondeState)
+    rf_operations: dict[str, RfHealth] = field(default_factory=dict)
     last_seen_date: str | None = None
+
+    def rf_health(self, operation: str, *, freshness_seconds: float, zone: int | None = None) -> RfHealth:
+        health = self.rf_operations.get(operation)
+        if health is None:
+            health = RfHealth(freshness_seconds=freshness_seconds, zone=zone)
+            self.rf_operations[operation] = health
+        return health

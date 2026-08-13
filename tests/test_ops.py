@@ -8,11 +8,12 @@ import pytest
 
 from frisquet_bridge.climate import HVAC_HEAT, PRESET_BOOST
 from frisquet_bridge.connect import ops as ops_module
-from frisquet_bridge.connect.client import FrisquetClient
+from frisquet_bridge.connect.client import AddressNotFound, FrisquetClient, RequestTimeout
 from frisquet_bridge.connect.ops import BoilerOps
 from frisquet_bridge.connect.state import ProtocolState
 from frisquet_bridge.frame import ADDR_SATELLITE_Z1, MSG_INIT, MSG_READ, Frame
 from frisquet_bridge.model import BoilerData, DhwMode, ZoneMode
+from frisquet_bridge.transport.base import TransportError
 from tests.helpers import FakeTransport, seed_zone_metadata
 
 
@@ -53,6 +54,67 @@ async def _ack_first_init(fake_transport: FakeTransport) -> None:
             payload=b"",
         )
     )
+
+
+async def test_tracked_operation_classifies_nack_timeout_transport_and_success(
+    fake_transport: FakeTransport,
+) -> None:
+    ops = _ops(fake_transport)
+    data = BoilerData()
+
+    async def nack() -> None:
+        raise AddressNotFound(
+            request_msg_type=MSG_READ,
+            request_payload=b"",
+            response=Frame(0x40, 0x80, 1, 1, 0x81, 0x83, b""),
+        )
+
+    async def timeout() -> None:
+        raise RequestTimeout("no response")
+
+    async def transport() -> None:
+        raise TransportError("serial offline")
+
+    async def success() -> None:
+        return None
+
+    for callback, field in (
+        (nack, "nacks"),
+        (timeout, "timeouts"),
+        (transport, "transport_failures"),
+    ):
+        with pytest.raises(TransportError):
+            await ops._tracked(data, "test_operation", 60.0, callback)
+        assert getattr(data.rf_operations["test_operation"], field) == 1
+
+    await ops._tracked(data, "test_operation", 60.0, success)
+    health = data.rf_operations["test_operation"]
+    assert health.attempts == 4
+    assert health.successes == 1
+    assert health.consecutive_failures == 0
+
+
+async def test_tracked_request_counts_each_retry_attempt(fake_transport: FakeTransport) -> None:
+    fake_transport.auto_reply = False
+    ops = _ops(fake_transport)
+    data = BoilerData()
+
+    with pytest.raises(RequestTimeout):
+        await ops._tracked_read(
+            data,
+            "retrying_read",
+            60.0,
+            0x79E0,
+            1,
+            lambda _payload, _data: None,
+            timeout=0.01,
+            retries=3,
+        )
+
+    health = data.rf_operations["retrying_read"]
+    assert health.attempts == 3
+    assert health.timeouts == 3
+    assert health.consecutive_failures == 3
 
 
 async def test_write_dhw_mode_sends_init_and_updates_model(fake_transport: FakeTransport) -> None:
@@ -156,6 +218,9 @@ async def test_write_zone_short_omits_schedule_when_unknown(fake_transport: Fake
     # OpenFrisquetVisio-style short write: write size 0x0003, 6-byte body, no schedule.
     assert sent.payload == bytes.fromhex("a1540018a154000306967814062500")
     assert data.zones[1].mode == ZoneMode.COMFORT
+    health = data.rf_operations["connect_zone1_write"]
+    assert health.attempts == ops_module.ZONE_WRITE_REPEATS
+    assert health.successes == ops_module.ZONE_WRITE_REPEATS
 
 
 async def test_send_zone_consigne_emits_satellite_write(fake_transport: FakeTransport) -> None:
@@ -175,6 +240,21 @@ async def test_send_zone_consigne_emits_satellite_write(fake_transport: FakeTran
     assert sent.payload == bytes.fromhex("a0290015a02f00040800c800be00040000")
     # the boiler-state block in the response is decoded back into the model
     assert data.zones[1].ambient_temperature == pytest.approx(27.3)
+
+
+async def test_malformed_zone_consigne_response_is_not_success(fake_transport: FakeTransport) -> None:
+    fake_transport.init_responses = {0x01: b"bad"}
+    ops = _ops(fake_transport, self_addr=ADDR_SATELLITE_Z1)
+    data = BoilerData()
+    data.zones[1].mode = ZoneMode.AUTO
+
+    with pytest.raises(ValueError):
+        await ops.send_zone_consigne(1, data, ambient=20.0, setpoint=19.0)
+
+    health = data.rf_operations["satellite_z1_consigne"]
+    assert health.attempts == 1
+    assert health.successes == 0
+    assert health.other_failures == 1
 
 
 async def test_read_satellite_info_uses_read_without_writing_ambient(fake_transport: FakeTransport) -> None:

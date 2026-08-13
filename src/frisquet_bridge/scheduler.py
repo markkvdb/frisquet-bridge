@@ -147,18 +147,20 @@ class PollScheduler:
                 await asyncio.wait_for(self._wake.wait(), timeout=sleep_for)
 
     async def _safe_poll(self, name: str, fn: Callable[[], Awaitable[None]]) -> bool:
+        succeeded = False
         try:
             await fn()
         except Exception:
             log.exception("poll_failed", poll=name)
-            return False
-        log.debug("poll_succeeded", poll=name)
+        else:
+            succeeded = True
+            log.debug("poll_succeeded", poll=name)
         if self._on_update is not None:
             try:
                 await self._on_update()
             except Exception:
                 log.exception("poll_update_failed", poll=name)
-        return True
+        return succeeded
 
     def _log_state(self) -> None:
         """Log the current internal state (zone temps, modes, boiler) for debugging."""

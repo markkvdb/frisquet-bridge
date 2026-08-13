@@ -95,6 +95,23 @@ class FailingSatelliteInfoOps(FakeBoilerOps):
         raise RuntimeError("no A029 response")
 
 
+async def test_failed_rf_operation_still_publishes_health_update() -> None:
+    data = BoilerData()
+    published = 0
+
+    async def fail_poll() -> None:
+        raise RuntimeError("RF failed")
+
+    async def publish() -> None:
+        nonlocal published
+        published += 1
+
+    scheduler = PollScheduler(None, data, poll_connect=False, on_update=publish)
+
+    assert await scheduler._safe_poll("test", fail_poll) is False
+    assert published == 1
+
+
 async def test_scheduler_uses_configured_sensor_interval() -> None:
     data = BoilerData()
     ops = FakeBoilerOps()

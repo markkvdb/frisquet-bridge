@@ -104,7 +104,9 @@ class VirtualSatellite:
             )
         except Exception:
             log.exception("virtual_satellite_send_failed", zone=self._zone)
-            return False
+            sent = False
+        else:
+            sent = True
         if self._on_update is not None:
             await self._on_update()
-        return True
+        return sent

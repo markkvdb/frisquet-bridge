@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 
 import structlog
@@ -47,6 +49,10 @@ class AddressNotFound(TransportError):
         )
 
 
+class RequestTimeout(TransportError):
+    """No matching RF response arrived before all request attempts expired."""
+
+
 class FrisquetClient:
     """Drives request/response exchanges with the boiler over a Transport."""
 
@@ -63,6 +69,10 @@ class FrisquetClient:
         self._state = state
         self._self_addr = self_addr
         self._boiler_addr = boiler_addr
+        self._last_response_rssi: int | None = None
+        self._attempt_outcome_callback: ContextVar[Callable[[str, int | None], None] | None] = ContextVar(
+            f"rf_attempt_outcome_{id(self)}", default=None
+        )
         # Serialises request/response exchanges so multiple clients sharing one
         # modem (connect + sonde + satellites) don't transmit over each other.
         self._lock = lock or asyncio.Lock()
@@ -70,6 +80,22 @@ class FrisquetClient:
     @property
     def state(self) -> ProtocolState:
         return self._state
+
+    @property
+    def last_response_rssi(self) -> int | None:
+        return self._last_response_rssi
+
+    def set_attempt_outcome_callback(self, callback: Callable[[str, int | None], None]) -> Token:
+        """Install a task-local request-attempt observer and return its reset token."""
+        return self._attempt_outcome_callback.set(callback)
+
+    def reset_attempt_outcome_callback(self, token: Token) -> None:
+        self._attempt_outcome_callback.reset(token)
+
+    def _record_attempt_outcome(self, outcome: str, rssi: int | None = None) -> None:
+        callback = self._attempt_outcome_callback.get()
+        if callback is not None:
+            callback(outcome, rssi)
 
     async def request(
         self,
@@ -132,6 +158,7 @@ class FrisquetClient:
                 try:
                     await self._transport.send(frame)
                 except TransportError as exc:
+                    self._record_attempt_outcome("transport_failure")
                     last_error = exc
                     log.warning(
                         "request_send_failed",
@@ -146,18 +173,23 @@ class FrisquetClient:
                     )
                     continue
 
-                response = await self._await_match(
-                    queue,
-                    from_addr=to_addr,
-                    to_addr=from_addr,
-                    association_id=self._state.association_id,
-                    request_id=req_id,
-                    control=control,
-                    msg_type=msg_type,
-                    request_payload=payload,
-                    timeout=timeout,
-                )
+                try:
+                    response = await self._await_match(
+                        queue,
+                        from_addr=to_addr,
+                        to_addr=from_addr,
+                        association_id=self._state.association_id,
+                        request_id=req_id,
+                        control=control,
+                        msg_type=msg_type,
+                        request_payload=payload,
+                        timeout=timeout,
+                    )
+                except AddressNotFound:
+                    self._record_attempt_outcome("nack")
+                    raise
                 if response is not None:
+                    self._record_attempt_outcome("success", self._last_response_rssi)
                     log.debug(
                         "request_succeeded",
                         attempt=attempt,
@@ -168,7 +200,8 @@ class FrisquetClient:
                         msg_type=f"0x{msg_type:02x}",
                     )
                     return response
-                last_error = TransportError("no matching response")
+                last_error = RequestTimeout("no matching response")
+                self._record_attempt_outcome("timeout")
                 log.warning(
                     "request_no_response",
                     attempt=attempt,
@@ -180,6 +213,8 @@ class FrisquetClient:
                     msg_type=f"0x{msg_type:02x}",
                 )
 
+            if isinstance(last_error, RequestTimeout):
+                raise RequestTimeout(f"request failed after {retries} attempts: {last_error}")
             raise TransportError(f"request failed after {retries} attempts: {last_error}")
 
     async def send_oneway(
@@ -192,6 +227,7 @@ class FrisquetClient:
         to_addr: int | None = None,
         repeats: int = 1,
         interval: float = 0.0,
+        on_attempt_outcome: Callable[[str, int | None], None] | None = None,
     ) -> None:
         """Transmit a frame without awaiting a response (fire-and-forget).
 
@@ -209,18 +245,25 @@ class FrisquetClient:
             # between retransmits stay free for the sonde / polling reads that
             # share this modem.
             async with self._lock:
-                await self._transport.set_network_id(self._state.network_id)
-                req_id = self._state.next_request_id()
-                frame = Frame(
-                    to_addr=to_addr,
-                    from_addr=from_addr,
-                    association_id=self._state.association_id,
-                    request_id=req_id,
-                    control=control,
-                    msg_type=msg_type,
-                    payload=payload,
-                )
-                await self._transport.send(frame)
+                try:
+                    await self._transport.set_network_id(self._state.network_id)
+                    req_id = self._state.next_request_id()
+                    frame = Frame(
+                        to_addr=to_addr,
+                        from_addr=from_addr,
+                        association_id=self._state.association_id,
+                        request_id=req_id,
+                        control=control,
+                        msg_type=msg_type,
+                        payload=payload,
+                    )
+                    await self._transport.send(frame)
+                except TransportError:
+                    if on_attempt_outcome is not None:
+                        on_attempt_outcome("transport_failure", None)
+                    raise
+                if on_attempt_outcome is not None:
+                    on_attempt_outcome("success", None)
             if interval > 0 and index + 1 < repeats:
                 await asyncio.sleep(interval)
 
@@ -274,6 +317,7 @@ class FrisquetClient:
                     response=received.frame,
                 )
             if received.frame.msg_type == msg_type:
+                self._last_response_rssi = received.rssi
                 return received.frame
 
     async def recover_network_id(self, *, timeout: float = 30.0) -> bytes:

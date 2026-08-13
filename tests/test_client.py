@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from frisquet_bridge.connect.client import AddressNotFound, FrisquetClient
+from frisquet_bridge.connect.client import AddressNotFound, FrisquetClient, RequestTimeout
 from frisquet_bridge.connect.state import ProtocolState
 from frisquet_bridge.frame import (
     ADDR_BOILER,
@@ -56,7 +56,7 @@ async def test_request_retries_then_raises(
     fake_transport.auto_reply = False
     client = FrisquetClient(fake_transport, protocol_state)
 
-    with pytest.raises(TransportError, match="failed after"):
+    with pytest.raises(RequestTimeout, match="failed after"):
         await client.request(
             control=0x01,
             msg_type=MSG_READ,
