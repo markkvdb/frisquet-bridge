@@ -112,11 +112,22 @@ class BoilerOps:
         payload = await self._client.read_memory(self._addr(ADDR_DATE), 0x0004)
         decode_clock(payload, data)
 
-    async def read_satellite_info(self, data: BoilerData) -> None:
+    async def read_satellite_info(
+        self,
+        data: BoilerData,
+        *,
+        timeout: float = 5.0,
+        retries: int = 3,
+    ) -> None:
         # The old captured INIT body contained 0x010d, which is an ambient
         # temperature of 26.9°C, not part of the address. Replaying it here
         # wrote 26.9°C to 0xa02f on every poll. Satellite info is read-only.
-        payload = await self._client.read_memory(self._addr(ADDR_SATELLITE_INFO), 0x0015)
+        payload = await self._client.read_memory(
+            self._addr(ADDR_SATELLITE_INFO),
+            0x0015,
+            timeout=timeout,
+            retries=retries,
+        )
         decode_satellite_init_response(payload, data)
         log.debug("satellite_info_read")
 

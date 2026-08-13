@@ -14,6 +14,8 @@ from frisquet_bridge.model import BoilerData
 log = structlog.get_logger(__name__)
 
 SENSOR_INTERVAL = 30.0
+SATELLITE_INFO_INTERVAL = 600.0
+SATELLITE_INFO_TIMEOUT = 1.0
 SLOW_INTERVAL = 3600.0
 
 
@@ -27,6 +29,9 @@ class PollScheduler:
         sonde_ops: BoilerOps | None = None,
         push_outside_temperature: bool = False,
         sensor_interval: float = SENSOR_INTERVAL,
+        poll_satellite_info: bool = True,
+        satellite_info_interval: float = SATELLITE_INFO_INTERVAL,
+        satellite_info_timeout: float = SATELLITE_INFO_TIMEOUT,
         outside_temperature_interval: float = SENSOR_INTERVAL,
         enabled_zones: tuple[int, ...] = (1, 2, 3),
         on_update: Callable[[], Awaitable[None]] | None = None,
@@ -37,6 +42,9 @@ class PollScheduler:
         self._sonde_ops = sonde_ops
         self._push_outside_temperature = push_outside_temperature
         self._sensor_interval = sensor_interval
+        self._poll_satellite_info = poll_satellite_info
+        self._satellite_info_interval = satellite_info_interval
+        self._satellite_info_timeout = satellite_info_timeout
         self._outside_temperature_interval = outside_temperature_interval
         self._enabled_zones = enabled_zones
         self._on_update = on_update
@@ -47,6 +55,7 @@ class PollScheduler:
 
     async def run(self) -> None:
         sensor_due = 0.0
+        satellite_info_due = 0.0
         slow_due = 0.0
         outside_temperature_due = 0.0
         loop = asyncio.get_running_loop()
@@ -55,13 +64,21 @@ class PollScheduler:
             now = loop.time()
             if self._poll_connect and self._ops is not None and now >= sensor_due:
                 await self._safe_poll("sensors", lambda: self._ops.read_sensors(self._data))
-                # Zone mode/ambient/setpoint come from satellite_info (0xa029).
-                # Zone schedule + comfort/reduced/frost setpoints are learned
-                # passively from satellite 0xa154 broadcasts (see PassiveMirror);
-                # the boiler does not serve a zone-config read to Connect.
-                await self._safe_poll("satellite_info", lambda: self._ops.read_satellite_info(self._data))
                 sensor_due = now + self._sensor_interval
                 self._log_state()
+            if self._poll_connect and self._ops is not None and now >= satellite_info_due:
+                ops = self._ops
+                await self._safe_poll(
+                    "satellite_info",
+                    lambda ops=ops: ops.read_satellite_info(
+                        self._data,
+                        timeout=self._satellite_info_timeout,
+                        retries=1,
+                    ),
+                )
+                satellite_info_due = float("inf")
+                if self._poll_satellite_info:
+                    satellite_info_due = now + self._satellite_info_interval
             if self._poll_connect and self._ops is not None and now >= slow_due:
                 await self._safe_poll("consumption", lambda: self._ops.read_consumption(self._data))
                 await self._safe_poll("daily_consumption", lambda: self._ops.read_daily_consumption(self._data))
@@ -82,7 +99,7 @@ class PollScheduler:
                 outside_temperature_due = now + self._outside_temperature_interval
             next_due = []
             if self._poll_connect and self._ops is not None:
-                next_due.extend((sensor_due, slow_due))
+                next_due.extend((sensor_due, satellite_info_due, slow_due))
             if self._push_outside_temperature and self._sonde_ops is not None and self._data.sonde.outside_temperature is not None:
                 next_due.append(outside_temperature_due)
             sleep_for = 5.0

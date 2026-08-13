@@ -27,6 +27,13 @@ log = structlog.get_logger(__name__)
 _SATELLITE_ADDR = {1: ADDR_SATELLITE_Z1, 2: ADDR_SATELLITE_Z2, 3: ADDR_SATELLITE_Z3}
 
 
+def _has_read_only_satellite_zone(cfg: BridgeConfig, enabled_zones: tuple[int, ...]) -> bool:
+    return any(
+        (zone_cfg := cfg.zone(zone_number)) is not None and zone_cfg.is_read_only_satellite
+        for zone_number in enabled_zones
+    )
+
+
 class BridgeService:
     def __init__(self, cfg: BridgeConfig, *, raw_recorder: RawMessageRecorder | None = None) -> None:
         self.cfg = cfg
@@ -160,10 +167,12 @@ class BridgeService:
                 await adapter.publish_discovery(mqtt_client)
 
             poll_connect = connect_ops is not None and self.cfg.connect_reads_enabled
+            poll_satellite_info = _has_read_only_satellite_zone(self.cfg, enabled_zones)
             scheduler = PollScheduler(
                 connect_ops,
                 self.data,
                 poll_connect=poll_connect,
+                poll_satellite_info=poll_satellite_info,
                 sonde_ops=sonde_ops,
                 push_outside_temperature=self.cfg.sonde is not None and self.cfg.sonde.enabled,
                 sensor_interval=self.cfg.sensor_poll_interval_seconds,
