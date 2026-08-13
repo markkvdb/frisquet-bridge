@@ -15,7 +15,7 @@ from frisquet_bridge.connect.state import ProtocolState
 from frisquet_bridge.emulation import PassiveMirror
 from frisquet_bridge.frame import ADDR_SATELLITE_Z1, ADDR_SATELLITE_Z2, ADDR_SATELLITE_Z3, ADDR_SONDE
 from frisquet_bridge.logging import RawMessageRecorder
-from frisquet_bridge.model import BoilerData
+from frisquet_bridge.model import BoilerData, ZoneSource
 from frisquet_bridge.mqtt.adapter import DEVICE_ID, MqttAdapter
 from frisquet_bridge.satellite import VirtualSatellite
 from frisquet_bridge.scheduler import PollScheduler
@@ -32,6 +32,17 @@ def _has_read_only_satellite_zone(cfg: BridgeConfig, enabled_zones: tuple[int, .
         (zone_cfg := cfg.zone(zone_number)) is not None and zone_cfg.is_read_only_satellite
         for zone_number in enabled_zones
     )
+
+
+def _configure_zone_sources(cfg: BridgeConfig, data: BoilerData) -> None:
+    for zone_number, zone_state in data.zones.items():
+        zone_cfg = cfg.zone(zone_number)
+        if zone_cfg is not None and zone_cfg.uses_virtual_satellite:
+            zone_state.source = ZoneSource.VIRTUAL
+        elif zone_cfg is not None and zone_cfg.is_read_only_satellite:
+            zone_state.source = ZoneSource.SATELLITE
+        elif cfg.connect_reads_enabled:
+            zone_state.source = ZoneSource.CONNECT
 
 
 class BridgeService:
@@ -120,6 +131,7 @@ class BridgeService:
                     await adapter.publish_state(mqtt_client)
 
             enabled_zones = tuple(zone for zone in (1, 2, 3) if self.cfg.zone_enabled(zone))
+            _configure_zone_sources(self.cfg, self.data)
 
             virtual_satellites: dict[int, VirtualSatellite] = {
                 zone_number: VirtualSatellite(

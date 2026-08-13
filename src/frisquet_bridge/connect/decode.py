@@ -14,6 +14,7 @@ from frisquet_bridge.model import (
     DhwMode,
     ZoneMode,
     ZoneSchedule,
+    ZoneSource,
     ZoneState,
 )
 
@@ -93,15 +94,13 @@ def decode_sensors(payload: bytes, data: BoilerData) -> None:
     b.pressure = _plausible(decode_pressure16(payload[21:23]), 0.0, 5.0)
     b.dhw_instant_temperature = _plausible(_temp16(payload, 25), 0.0, 95.0)
 
-    data.zones[1].ambient_temperature = _plausible(_temp16(payload, 37), 0.0, 45.0)
-    data.zones[2].ambient_temperature = _plausible(_temp16(payload, 39), 0.0, 45.0)
-    data.zones[3].ambient_temperature = _plausible(_temp16(payload, 41), 0.0, 45.0)
+    for zone, ambient_offset, setpoint_offset in ((1, 37, 49), (2, 39, 51), (3, 41, 53)):
+        if data.zones[zone].source == ZoneSource.CONNECT:
+            data.zones[zone].ambient_temperature = _plausible(_temp16(payload, ambient_offset), 0.0, 45.0)
+            data.zones[zone].setpoint_temperature = _plausible(_temp16(payload, setpoint_offset), 0.0, 35.0)
     data.zones[1].flow_setpoint_temperature = _plausible(_temp16(payload, 43), 0.0, 95.0)
     data.zones[2].flow_setpoint_temperature = _plausible(_temp16(payload, 45), 0.0, 95.0)
     data.zones[3].flow_setpoint_temperature = _plausible(_temp16(payload, 47), 0.0, 95.0)
-    data.zones[1].setpoint_temperature = _plausible(_temp16(payload, 49), 0.0, 35.0)
-    data.zones[2].setpoint_temperature = _plausible(_temp16(payload, 51), 0.0, 35.0)
-    data.zones[3].setpoint_temperature = _plausible(_temp16(payload, 53), 0.0, 35.0)
 
     ext = _outside_temp16(payload, 55)
     if ext is not None:
@@ -184,6 +183,8 @@ def decode_zone_init(payload: bytes, zone: int, data: BoilerData) -> None:
     from frisquet_bridge.connect.codec import decode_temp8
 
     zs = data.zones[zone]
+    if zs.source == ZoneSource.VIRTUAL:
+        return
     mode_options = body[4]
     boost = bool(mode_options & 0b0100_0000)
     if not boost:
@@ -232,10 +233,12 @@ def decode_zone_consigne(payload: bytes, zone: int, data: BoilerData) -> None:
     (read/write address + size + data length) followed by ambient(2),
     setpoint(2), unknown(1), mode(1), options(2).
     """
+    zs = data.zones[zone]
+    if zs.source != ZoneSource.SATELLITE:
+        return
     body = payload[9:] if len(payload) >= 9 else b""
     if len(body) < 6:
         return
-    zs = data.zones[zone]
     ambient = _temp16(body, 0)
     setpoint = _temp16(body, 2)
     if ambient is not None:
@@ -286,6 +289,8 @@ def _zone_init_body(payload: bytes) -> bytes:
 
 def _decode_satellite_zone(payload: bytes, data: BoilerData, *, zone: int, offset: int) -> None:
     zs = data.zones[zone]
+    if zs.source != ZoneSource.SATELLITE:
+        return
     ambient = _temp16(payload, offset)
     setpoint = _temp16(payload, offset + 2)
     if ambient is None and setpoint in (None, 0.0):

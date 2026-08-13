@@ -63,6 +63,14 @@ DHW_SELECTABLE_MODES: tuple[DhwMode, ...] = (
 )
 
 
+class ZoneSource(StrEnum):
+    """Configured owner of a zone's room state."""
+
+    CONNECT = "connect"
+    SATELLITE = "satellite"
+    VIRTUAL = "virtual"
+
+
 class ZoneMode(StrEnum):
     """Heating mode for a zone."""
 
@@ -187,6 +195,7 @@ class BoilerState:
 @dataclass
 class ZoneState:
     zone: int
+    source: ZoneSource = ZoneSource.SATELLITE
     flow_temperature: float | None = None
     flow_setpoint_temperature: float | None = None
     ambient_temperature: float | None = None

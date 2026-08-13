@@ -24,7 +24,7 @@ from frisquet_bridge.connect.decode import (
     memory_address,
 )
 from frisquet_bridge.frame import ADDR_BOILER, MSG_BOILER_EVENT, MSG_INIT, MSG_MEMORY_PUSH, MSG_READ, Frame
-from frisquet_bridge.model import BoilerData
+from frisquet_bridge.model import BoilerData, ZoneSource
 
 log = logging.getLogger(__name__)
 ZONE_IDS = {0x08: 1, 0x09: 2, 0x0A: 3}
@@ -263,6 +263,8 @@ def _describe_satellite_info(frame: Frame) -> str | None:
     if zone is None or not frame.is_ack:
         return None
     data = BoilerData()
+    for zone in data.zones.values():
+        zone.source = ZoneSource.SATELLITE
     try:
         decode_satellite_info(frame.payload, data)
     except ValueError as exc:

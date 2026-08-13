@@ -3,7 +3,8 @@
 from pathlib import Path
 
 from frisquet_bridge.config import BridgeConfig, ZoneConfig
-from frisquet_bridge.service import _has_read_only_satellite_zone
+from frisquet_bridge.model import BoilerData, ZoneSource
+from frisquet_bridge.service import _configure_zone_sources, _has_read_only_satellite_zone
 
 
 def _config(tmp_path: Path, *modes: str) -> BridgeConfig:
@@ -26,3 +27,25 @@ def test_central_zone_only_needs_satellite_info_bootstrap(tmp_path: Path) -> Non
 def test_physical_satellite_zone_enables_slow_satellite_info_polling(tmp_path: Path) -> None:
     cfg = _config(tmp_path, "virtual_satellite", "satellite", "disabled")
     assert _has_read_only_satellite_zone(cfg, (1, 2))
+
+
+def test_configure_zone_sources_maps_connect_physical_and_virtual_owners(tmp_path: Path) -> None:
+    cfg = _config(tmp_path, "disabled", "satellite", "virtual_satellite")
+    cfg.connect = None
+    data = BoilerData()
+    data.zones[1].source = ZoneSource.CONNECT
+
+    _configure_zone_sources(cfg, data)
+
+    assert data.zones[1].source == ZoneSource.CONNECT
+    assert data.zones[2].source == ZoneSource.SATELLITE
+    assert data.zones[3].source == ZoneSource.VIRTUAL
+
+
+def test_configure_zone_sources_maps_central_boiler_to_virtual_owner(tmp_path: Path) -> None:
+    cfg = _config(tmp_path, "central_boiler", "disabled", "disabled")
+    data = BoilerData()
+
+    _configure_zone_sources(cfg, data)
+
+    assert data.zones[1].source == ZoneSource.VIRTUAL

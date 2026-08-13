@@ -25,7 +25,7 @@ from frisquet_bridge.connect.decode import (
 )
 from frisquet_bridge.connect.passive import PassiveReadTracker
 from frisquet_bridge.frame import MSG_BOILER_EVENT, MSG_MEMORY_PUSH, Frame
-from frisquet_bridge.model import BoilerData, DhwMode, ZoneMode, ZoneState
+from frisquet_bridge.model import BoilerData, DhwMode, ZoneMode, ZoneSource, ZoneState
 
 
 def _sensors_payload() -> bytes:
@@ -62,6 +62,8 @@ def test_decode_sensors_rich_connect_block() -> None:
         "00000000000000000000011104f604f600c600c600c6005000000000050a"
     )
     data = BoilerData()
+    for zone in data.zones.values():
+        zone.source = ZoneSource.CONNECT
 
     decode_sensors(payload, data)
 
@@ -90,6 +92,27 @@ def test_decode_sensors_does_not_overwrite_virtual_sonde_target() -> None:
 
     assert data.boiler.outside_temperature == pytest.approx(17.2)
     assert data.sonde.outside_temperature == pytest.approx(18.5)
+
+
+def test_decode_sensors_gates_room_state_but_always_updates_flow_by_source() -> None:
+    payload = bytearray(_sensors_payload())
+    for offset, value in ((5, 451), (7, 452), (37, 201), (39, 202), (43, 501), (45, 502), (49, 191), (51, 192)):
+        payload[offset : offset + 2] = value.to_bytes(2, "big", signed=True)
+    data = BoilerData()
+    data.zones[1].source = ZoneSource.CONNECT
+    data.zones[2].source = ZoneSource.SATELLITE
+    data.zones[3].source = ZoneSource.VIRTUAL
+    for zone in data.zones.values():
+        zone.ambient_temperature = 18.0
+        zone.setpoint_temperature = 19.0
+
+    decode_sensors(bytes(payload), data)
+
+    assert (data.zones[1].ambient_temperature, data.zones[1].setpoint_temperature) == pytest.approx((20.1, 19.1))
+    assert (data.zones[2].ambient_temperature, data.zones[2].setpoint_temperature) == pytest.approx((18.0, 19.0))
+    assert (data.zones[3].ambient_temperature, data.zones[3].setpoint_temperature) == pytest.approx((18.0, 19.0))
+    assert (data.zones[1].flow_temperature, data.zones[2].flow_temperature) == pytest.approx((45.1, 45.2))
+    assert (data.zones[1].flow_setpoint_temperature, data.zones[2].flow_setpoint_temperature) == pytest.approx((50.1, 50.2))
 
 
 def test_decode_sensors_filters_implausible_values() -> None:
@@ -232,6 +255,8 @@ def test_decode_clock() -> None:
 
 def test_decode_satellite_info() -> None:
     data = BoilerData()
+    for zone in data.zones.values():
+        zone.source = ZoneSource.SATELLITE
     payload = bytes.fromhex("2a050a000026062216274421010111005000100000000004f6000000000000000004f60000000000000000")
 
     decode_satellite_info(payload, data)
@@ -258,6 +283,22 @@ def test_decode_satellite_info_does_not_overwrite_virtual_sonde_target() -> None
     assert data.sonde.outside_temperature == pytest.approx(18.5)
 
 
+@pytest.mark.parametrize("source", [ZoneSource.CONNECT, ZoneSource.VIRTUAL])
+def test_decode_satellite_info_does_not_replace_non_satellite_room_state(source: ZoneSource) -> None:
+    payload = bytes.fromhex("2a050a000026062216274421010111005000100000000004f6000000000000000004f60000000000000000")
+    data = BoilerData()
+    zone = data.zones[1]
+    zone.source = source
+    zone.ambient_temperature = 21.0
+    zone.setpoint_temperature = 22.0
+    zone.mode = ZoneMode.COMFORT
+
+    decode_satellite_info(payload, data)
+
+    assert (zone.ambient_temperature, zone.setpoint_temperature) == pytest.approx((21.0, 22.0))
+    assert zone.mode == ZoneMode.COMFORT
+
+
 def test_decode_zone_init_long_payload() -> None:
     data = BoilerData()
     payload = bytes.fromhex(
@@ -278,6 +319,34 @@ def test_decode_zone_init_long_payload() -> None:
     assert zone.override is False
     assert zone.schedule is not None
     assert zone.schedule.days["sunday"].hex() == "00e0ffffffff"
+
+
+def test_zone_init_does_not_replace_virtual_zone_state() -> None:
+    data = BoilerData()
+    zone = data.zones[1]
+    zone.source = ZoneSource.VIRTUAL
+    zone.mode = ZoneMode.COMFORT
+    zone.comfort_temperature = 21.0
+
+    decode_zone_init(bytes.fromhex("a1540015a154000306967814082000"), 1, data)
+
+    assert zone.mode == ZoneMode.COMFORT
+    assert zone.comfort_temperature == pytest.approx(21.0)
+
+
+@pytest.mark.parametrize("source", [ZoneSource.CONNECT, ZoneSource.VIRTUAL])
+def test_zone_consigne_does_not_replace_non_satellite_room_state(source: ZoneSource) -> None:
+    data = BoilerData()
+    zone = data.zones[1]
+    zone.source = source
+    zone.mode = ZoneMode.COMFORT
+    zone.ambient_temperature = 20.0
+    zone.setpoint_temperature = 21.0
+
+    decode_zone_consigne(bytes.fromhex("a0290015a02f00040800c800be00040000"), 1, data)
+
+    assert zone.mode == ZoneMode.COMFORT
+    assert (zone.ambient_temperature, zone.setpoint_temperature) == pytest.approx((20.0, 21.0))
 
 
 def test_passive_read_tracker_decodes_zone_init() -> None:
@@ -395,6 +464,7 @@ def test_encode_satellite_mode_unknown_raises() -> None:
 
 def test_decode_zone_consigne_populates_zone() -> None:
     data = BoilerData()
+    data.zones[1].source = ZoneSource.SATELLITE
     decode_zone_consigne(bytes.fromhex("a0290015a02f00040800c800be00040000"), 1, data)
     zone = data.zones[1]
     assert zone.ambient_temperature == 20.0
