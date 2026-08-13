@@ -6,12 +6,13 @@ import asyncio
 
 import pytest
 
-from frisquet_bridge.connect.client import FrisquetClient
+from frisquet_bridge.connect.client import AddressNotFound, FrisquetClient
 from frisquet_bridge.connect.state import ProtocolState
 from frisquet_bridge.frame import (
     ADDR_BOILER,
     ADDR_BROADCAST,
     ADDR_CONNECT,
+    MSG_ADDRESS_NOT_FOUND,
     MSG_ASSOCIATION,
     MSG_READ,
     Frame,
@@ -126,6 +127,89 @@ async def test_request_send_failure_retries(
         )
 
     assert fake_transport.sent == []
+
+
+async def test_matching_address_not_found_is_terminal_without_retry(
+    fake_transport: FakeTransport,
+    protocol_state: ProtocolState,
+) -> None:
+    fake_transport.auto_reply = False
+    client = FrisquetClient(fake_transport, protocol_state)
+
+    async def push_nack() -> None:
+        while not fake_transport.sent:
+            await asyncio.sleep(0)
+        request = fake_transport.sent[0]
+        fake_transport.push_frame(
+            Frame(
+                to_addr=request.from_addr,
+                from_addr=request.to_addr,
+                association_id=request.association_id,
+                request_id=request.request_id,
+                control=0x81,
+                msg_type=MSG_ADDRESS_NOT_FOUND,
+                payload=request.payload,
+            )
+        )
+
+    task = asyncio.create_task(push_nack())
+    try:
+        with pytest.raises(AddressNotFound) as caught:
+            await client.read_memory(0xA029, 1, retries=3)
+    finally:
+        await task
+
+    assert len(fake_transport.sent) == 1
+    assert caught.value.request_msg_type == MSG_READ
+    assert caught.value.request_payload == bytes.fromhex("a0290001")
+
+
+async def test_wrong_identity_and_non_ack_nacks_are_noise_before_success(
+    fake_transport: FakeTransport,
+    protocol_state: ProtocolState,
+) -> None:
+    fake_transport.auto_reply = False
+    client = FrisquetClient(fake_transport, protocol_state)
+
+    async def push_noise_then_success() -> None:
+        while not fake_transport.sent:
+            await asyncio.sleep(0)
+        request = fake_transport.sent[0]
+        for request_id, control in (
+            (request.request_id + 1, 0x81),
+            (request.request_id, 0x01),
+            (request.request_id, 0x82),
+        ):
+            fake_transport.push_frame(
+                Frame(
+                    to_addr=request.from_addr,
+                    from_addr=request.to_addr,
+                    association_id=request.association_id,
+                    request_id=request_id,
+                    control=control,
+                    msg_type=MSG_ADDRESS_NOT_FOUND,
+                )
+            )
+        fake_transport.push_frame(
+            Frame(
+                to_addr=request.from_addr,
+                from_addr=request.to_addr,
+                association_id=request.association_id,
+                request_id=request.request_id,
+                control=0x81,
+                msg_type=MSG_READ,
+                payload=b"success",
+            )
+        )
+
+    task = asyncio.create_task(push_noise_then_success())
+    try:
+        result = await client.read_memory(0xA029, 1, retries=1)
+    finally:
+        await task
+
+    assert result == b"success"
+    assert len(fake_transport.sent) == 1
 
 
 async def test_pair_success(

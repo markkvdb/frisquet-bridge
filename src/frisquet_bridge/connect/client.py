@@ -12,6 +12,7 @@ from frisquet_bridge.frame import (
     ADDR_BOILER,
     ADDR_BROADCAST,
     ADDR_CONNECT,
+    MSG_ADDRESS_NOT_FOUND,
     MSG_ASSOCIATION,
     MSG_READ,
     Frame,
@@ -32,6 +33,18 @@ class Association:
     network_id: bytes
     association_id: int
     request_id: int
+
+
+class AddressNotFound(TransportError):
+    """The boiler rejected a matching operation because its address is unknown."""
+
+    def __init__(self, *, request_msg_type: int, request_payload: bytes, response: Frame) -> None:
+        self.request_msg_type = request_msg_type
+        self.request_payload = request_payload
+        self.response = response
+        super().__init__(
+            f"address not found for message 0x{request_msg_type:02x} payload {request_payload.hex()}"
+        )
 
 
 class FrisquetClient:
@@ -139,7 +152,9 @@ class FrisquetClient:
                     to_addr=from_addr,
                     association_id=self._state.association_id,
                     request_id=req_id,
+                    control=control,
                     msg_type=msg_type,
+                    request_payload=payload,
                     timeout=timeout,
                 )
                 if response is not None:
@@ -228,7 +243,9 @@ class FrisquetClient:
         to_addr: int,
         association_id: int,
         request_id: int,
+        control: int,
         msg_type: int,
+        request_payload: bytes,
         timeout: float,
     ) -> Frame | None:
         loop = asyncio.get_running_loop()
@@ -241,12 +258,22 @@ class FrisquetClient:
                 received = await asyncio.wait_for(queue.get(), remaining)
             except TimeoutError:
                 return None
-            if received.frame.matches(
+            if not received.frame.matches(
                 from_addr=from_addr,
                 to_addr=to_addr,
                 association_id=association_id,
                 request_id=request_id,
-            ) and received.frame.msg_type == msg_type and received.frame.is_ack:
+            ) or not received.frame.is_ack:
+                continue
+            if received.frame.msg_type == MSG_ADDRESS_NOT_FOUND:
+                if received.frame.control != ((control & 0x7F) | 0x80):
+                    continue
+                raise AddressNotFound(
+                    request_msg_type=msg_type,
+                    request_payload=request_payload,
+                    response=received.frame,
+                )
+            if received.frame.msg_type == msg_type:
                 return received.frame
 
     async def recover_network_id(self, *, timeout: float = 30.0) -> bytes:
