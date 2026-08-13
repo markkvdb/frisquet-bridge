@@ -68,6 +68,27 @@ class FakeMqttClient:
         self.published.append((topic, payload, retain))
 
 
+async def test_outside_temperature_command_uses_coordinated_writer(tmp_path: Path) -> None:
+    cfg = BridgeConfig(path=tmp_path / "config.toml", network_id=bytes.fromhex("05d97f78"), boiler_addr=0x80)
+    data = BoilerData()
+    writes: list[float] = []
+
+    async def write_outside_temperature(temperature: float) -> bool:
+        writes.append(temperature)
+        return True
+
+    mqtt = MqttAdapter(
+        cfg,
+        data,
+        None,
+        outside_temperature_writer=write_outside_temperature,
+    )
+
+    await mqtt.handle_command("frisquet/outsideSensor/outsideTemperature/set", "12.34")
+
+    assert writes == [12.34]
+
+
 @pytest.fixture
 def adapter(tmp_path: Path) -> tuple[MqttAdapter, BoilerData, FakeOps]:
     cfg = BridgeConfig(path=tmp_path / "config.toml", network_id=bytes.fromhex("05d97f78"), boiler_addr=0x80)

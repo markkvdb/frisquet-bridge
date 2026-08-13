@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from frisquet_bridge.climate import zone_target_temperature
+from frisquet_bridge.connect.decode import encode_satellite_mode
 from frisquet_bridge.model import SCHEDULE_DAYS, BoilerData, ZoneMode, ZoneSchedule
 from frisquet_bridge.state_store import load_protocol_request_ids, load_zone_state, save_protocol_request_id, save_zone_state
 
@@ -73,6 +77,74 @@ def test_zone_state_persists_partial_setpoints(tmp_path: Path) -> None:
     load_zone_state(path, dst)
 
     assert dst.zones[1].reduced_temperature == 16.5
+
+
+@pytest.mark.parametrize(
+    ("auto_comfort", "override", "wire_mode"),
+    (
+        (True, False, 0x05),
+        (False, True, 0x02),
+        (True, True, 0x03),
+    ),
+)
+def test_auto_mode_flags_survive_restart_without_other_zone_metadata(
+    tmp_path: Path,
+    auto_comfort: bool,
+    override: bool,
+    wire_mode: int,
+) -> None:
+    path = tmp_path / "config.state.json"
+    src = BoilerData()
+    zone = src.zones[1]
+    zone.mode = ZoneMode.AUTO
+    zone.auto_comfort = auto_comfort
+    zone.override = override
+
+    save_zone_state(path, src)
+    dst = BoilerData()
+    load_zone_state(path, dst)
+
+    loaded = dst.zones[1]
+    assert loaded.mode == ZoneMode.AUTO
+    assert loaded.auto_comfort is auto_comfort
+    assert loaded.override is override
+    assert encode_satellite_mode(loaded) == wire_mode
+
+
+def test_boost_survives_restart_and_preserves_active_setpoint(tmp_path: Path) -> None:
+    path = tmp_path / "config.state.json"
+    src = BoilerData()
+    zone = src.zones[1]
+    zone.mode = ZoneMode.COMFORT
+    zone.boost = True
+    zone.comfort_temperature = 20.0
+
+    save_zone_state(path, src)
+    dst = BoilerData()
+    load_zone_state(path, dst)
+
+    loaded = dst.zones[1]
+    assert loaded.mode == ZoneMode.COMFORT
+    assert loaded.boost is True
+    assert encode_satellite_mode(loaded) == 0x01
+    assert zone_target_temperature(loaded) == pytest.approx(22.0)
+
+
+def test_legacy_zone_state_without_mode_flags_keeps_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "config.state.json"
+    path.write_text(
+        '{"1": {"mode": "Auto", "mode_options": 16, "comfort_temperature": 20.0}}',
+        encoding="utf-8",
+    )
+
+    data = BoilerData()
+    load_zone_state(path, data)
+
+    zone = data.zones[1]
+    assert zone.mode == ZoneMode.AUTO
+    assert zone.auto_comfort is None
+    assert zone.override is False
+    assert zone.boost is False
 
 
 def test_load_missing_file_is_noop(tmp_path: Path) -> None:

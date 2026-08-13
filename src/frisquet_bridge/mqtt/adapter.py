@@ -302,6 +302,7 @@ class MqttAdapter:
         ops: BoilerOps | None,
         *,
         sonde_ops: BoilerOps | None = None,
+        outside_temperature_writer: Callable[[float], Awaitable[bool]] | None = None,
         virtual_satellites: dict[int, VirtualSatellite] | None = None,
         on_state_change: Callable[[], Awaitable[None]] | None = None,
         on_persist_state: Callable[[], None] | None = None,
@@ -310,6 +311,7 @@ class MqttAdapter:
         self._data = data
         self._ops = ops
         self._sonde_ops = sonde_ops
+        self._outside_temperature_writer = outside_temperature_writer
         self._virtual = virtual_satellites or {}
         self._on_change = on_state_change
         self._on_persist_state = on_persist_state
@@ -723,10 +725,16 @@ class MqttAdapter:
                 raise
             if self._on_change:
                 await self._on_change()
-        elif topic.endswith("outsideSensor/outsideTemperature/set") and self._sonde_ops is not None:
-            await self._sonde_ops.write_outside_temperature(self._data, float(payload))
-            if self._on_change:
-                await self._on_change()
+        elif topic.endswith("outsideSensor/outsideTemperature/set"):
+            temperature = float(payload)
+            if self._outside_temperature_writer is not None:
+                await self._outside_temperature_writer(temperature)
+            elif self._sonde_ops is not None:
+                await self._sonde_ops.write_outside_temperature(self._data, temperature)
+                if self._on_change:
+                    await self._on_change()
+            else:
+                log.warning("mqtt_command_ignored", topic=topic)
         else:
             central_command = self._central_command(topic)
             if central_command is not None:

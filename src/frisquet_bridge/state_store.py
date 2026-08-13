@@ -49,10 +49,14 @@ def _serialize_zone(zone: ZoneState) -> dict[str, object] | None:
         zone.central_demand_on_delta,
         zone.central_demand_off_margin,
     )
+    mode_values = (zone.mode, zone.mode_options, zone.auto_comfort)
     if (
         zone.schedule is None
         and all(value is None for value in zone_temperatures)
         and all(value is None for value in central_values)
+        and all(value is None for value in mode_values)
+        and not zone.override
+        and not zone.boost
     ):
         return None
     schedule_hex: str | None = None
@@ -61,6 +65,9 @@ def _serialize_zone(zone: ZoneState) -> dict[str, object] | None:
     return {
         "mode": zone.mode.value if zone.mode is not None else None,
         "mode_options": zone.mode_options,
+        "auto_comfort": zone.auto_comfort,
+        "override": zone.override,
+        "boost": zone.boost,
         "comfort_temperature": zone.comfort_temperature,
         "reduced_temperature": zone.reduced_temperature,
         "frost_temperature": zone.frost_temperature,
@@ -77,8 +84,17 @@ def _apply_zone(zone: ZoneState, raw: dict[str, object]) -> None:
     mode = raw.get("mode")
     if isinstance(mode, str):
         zone.mode = ZoneMode.parse(mode)
-    if isinstance(raw.get("mode_options"), int):
-        zone.mode_options = int(raw["mode_options"])
+    mode_options = raw.get("mode_options")
+    if isinstance(mode_options, int) and not isinstance(mode_options, bool):
+        zone.mode_options = mode_options
+    if "auto_comfort" in raw:
+        auto_comfort = raw["auto_comfort"]
+        if auto_comfort is None or isinstance(auto_comfort, bool):
+            zone.auto_comfort = auto_comfort
+    for attr in ("override", "boost"):
+        value = raw.get(attr)
+        if isinstance(value, bool):
+            setattr(zone, attr, value)
     for attr in ("comfort_temperature", "reduced_temperature", "frost_temperature"):
         value = raw.get(attr)
         if isinstance(value, int | float) and not isinstance(value, bool):

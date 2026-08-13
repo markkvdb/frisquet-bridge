@@ -154,6 +154,20 @@ class BridgeService:
                     on_zone_config=lambda: save_zone_state(self.cfg.state_path, self.data),
                 )
 
+            poll_connect = connect_ops is not None and self.cfg.connect_reads_enabled
+            poll_satellite_info = _has_read_only_satellite_zone(self.cfg, enabled_zones)
+            scheduler = PollScheduler(
+                connect_ops,
+                self.data,
+                poll_connect=poll_connect,
+                poll_satellite_info=poll_satellite_info,
+                sonde_ops=sonde_ops,
+                push_outside_temperature=self.cfg.sonde is not None and self.cfg.sonde.enabled,
+                sensor_interval=self.cfg.sensor_poll_interval_seconds,
+                enabled_zones=enabled_zones,
+                on_update=publish_mqtt,
+            )
+
             if self.cfg.mqtt.enabled:
                 availability_topic = f"{self.cfg.mqtt.base_topic.rstrip('/')}/{DEVICE_ID}/availability"
                 mqtt_client = aiomqtt.Client(
@@ -172,25 +186,12 @@ class BridgeService:
                     self.data,
                     connect_ops,
                     sonde_ops=sonde_ops,
+                    outside_temperature_writer=scheduler.send_outside_temperature_now,
                     virtual_satellites=virtual_satellites,
                     on_state_change=publish_mqtt,
                     on_persist_state=lambda: save_zone_state(self.cfg.state_path, self.data),
                 )
                 await adapter.publish_discovery(mqtt_client)
-
-            poll_connect = connect_ops is not None and self.cfg.connect_reads_enabled
-            poll_satellite_info = _has_read_only_satellite_zone(self.cfg, enabled_zones)
-            scheduler = PollScheduler(
-                connect_ops,
-                self.data,
-                poll_connect=poll_connect,
-                poll_satellite_info=poll_satellite_info,
-                sonde_ops=sonde_ops,
-                push_outside_temperature=self.cfg.sonde is not None and self.cfg.sonde.enabled,
-                sensor_interval=self.cfg.sensor_poll_interval_seconds,
-                enabled_zones=enabled_zones,
-                on_update=publish_mqtt,
-            )
 
             async def rf_loop() -> None:
                 async for received in transport.frames():

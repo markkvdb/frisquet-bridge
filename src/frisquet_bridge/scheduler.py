@@ -16,7 +16,11 @@ log = structlog.get_logger(__name__)
 SENSOR_INTERVAL = 30.0
 SATELLITE_INFO_INTERVAL = 600.0
 SATELLITE_INFO_TIMEOUT = 1.0
+OUTSIDE_TEMPERATURE_INTERVAL = 600.0
+OUTSIDE_TEMPERATURE_RETRY_INTERVAL = 60.0
 SLOW_INTERVAL = 3600.0
+
+_UNCHANGED = object()
 
 
 class PollScheduler:
@@ -32,7 +36,8 @@ class PollScheduler:
         poll_satellite_info: bool = True,
         satellite_info_interval: float = SATELLITE_INFO_INTERVAL,
         satellite_info_timeout: float = SATELLITE_INFO_TIMEOUT,
-        outside_temperature_interval: float = SENSOR_INTERVAL,
+        outside_temperature_interval: float = OUTSIDE_TEMPERATURE_INTERVAL,
+        outside_temperature_retry_interval: float = OUTSIDE_TEMPERATURE_RETRY_INTERVAL,
         enabled_zones: tuple[int, ...] = (1, 2, 3),
         on_update: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
@@ -46,21 +51,59 @@ class PollScheduler:
         self._satellite_info_interval = satellite_info_interval
         self._satellite_info_timeout = satellite_info_timeout
         self._outside_temperature_interval = outside_temperature_interval
+        self._outside_temperature_retry_interval = outside_temperature_retry_interval
+        self._outside_temperature_due = 0.0
+        self._outside_temperature_lock = asyncio.Lock()
         self._enabled_zones = enabled_zones
         self._on_update = on_update
         self._stop = asyncio.Event()
+        self._wake = asyncio.Event()
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
+
+    async def send_outside_temperature_now(self, temperature: float) -> bool:
+        """Store and immediately send a new desired outside temperature."""
+        normalized = max(-30.0, min(80.0, round(temperature * 10) / 10))
+        return await self._attempt_outside_temperature(normalized)
+
+    async def _attempt_outside_temperature(
+        self,
+        temperature: float | object = _UNCHANGED,
+        *,
+        only_if_due: bool = False,
+    ) -> bool:
+        if self._sonde_ops is None:
+            return False
+        async with self._outside_temperature_lock:
+            loop = asyncio.get_running_loop()
+            if only_if_due and loop.time() < self._outside_temperature_due:
+                return False
+            if temperature is not _UNCHANGED:
+                self._data.sonde.outside_temperature = float(temperature)
+            desired = self._data.sonde.outside_temperature
+            if desired is None:
+                return False
+            succeeded = await self._safe_poll(
+                "outside_temperature",
+                lambda: self._sonde_ops.write_outside_temperature(self._data, desired),
+            )
+            interval = self._outside_temperature_interval if succeeded else self._outside_temperature_retry_interval
+            self._outside_temperature_due = asyncio.get_running_loop().time() + interval
+            self._wake.set()
+            return succeeded
 
     async def run(self) -> None:
         sensor_due = 0.0
         satellite_info_due = 0.0
         slow_due = 0.0
-        outside_temperature_due = 0.0
         loop = asyncio.get_running_loop()
 
         while not self._stop.is_set():
+            self._wake.clear()
+            if self._stop.is_set():
+                break
             now = loop.time()
             if self._poll_connect and self._ops is not None and now >= sensor_due:
                 await self._safe_poll("sensors", lambda: self._ops.read_sensors(self._data))
@@ -89,33 +132,33 @@ class PollScheduler:
                 self._push_outside_temperature
                 and self._sonde_ops is not None
                 and self._data.sonde.outside_temperature is not None
-                and now >= outside_temperature_due
+                and now >= self._outside_temperature_due
             ):
-                temperature = self._data.sonde.outside_temperature
-                await self._safe_poll(
-                    "outside_temperature",
-                    lambda temperature=temperature: self._sonde_ops.write_outside_temperature(self._data, temperature),
-                )
-                outside_temperature_due = now + self._outside_temperature_interval
+                await self._attempt_outside_temperature(only_if_due=True)
             next_due = []
             if self._poll_connect and self._ops is not None:
                 next_due.extend((sensor_due, satellite_info_due, slow_due))
             if self._push_outside_temperature and self._sonde_ops is not None and self._data.sonde.outside_temperature is not None:
-                next_due.append(outside_temperature_due)
+                next_due.append(self._outside_temperature_due)
             sleep_for = 5.0
             if next_due:
                 sleep_for = min(sleep_for, max(0.0, min(next_due) - loop.time()))
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._stop.wait(), timeout=sleep_for)
+                await asyncio.wait_for(self._wake.wait(), timeout=sleep_for)
 
-    async def _safe_poll(self, name: str, fn: Callable[[], Awaitable[None]]) -> None:
+    async def _safe_poll(self, name: str, fn: Callable[[], Awaitable[None]]) -> bool:
         try:
             await fn()
-            log.debug("poll_succeeded", poll=name)
-            if self._on_update is not None:
-                await self._on_update()
         except Exception:
             log.exception("poll_failed", poll=name)
+            return False
+        log.debug("poll_succeeded", poll=name)
+        if self._on_update is not None:
+            try:
+                await self._on_update()
+            except Exception:
+                log.exception("poll_update_failed", poll=name)
+        return True
 
     def _log_state(self) -> None:
         """Log the current internal state (zone temps, modes, boiler) for debugging."""
