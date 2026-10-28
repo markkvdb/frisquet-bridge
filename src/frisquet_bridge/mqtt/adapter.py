@@ -46,6 +46,7 @@ _LABELS = {  # chkstyle: ignore-node
         "dhw_power": "Boiler DHW instant power",
         "heating_power": "Boiler heating instant power",
         "pressure": "Boiler pressure",
+        "boiler_outside_temperature": "Boiler outside temperature",
         "dhw_consumption": "Boiler DHW total consumption",
         "heating_consumption": "Boiler heating total consumption",
         "daily_dhw_consumption": "Boiler DHW previous day consumption",
@@ -77,6 +78,7 @@ _LABELS = {  # chkstyle: ignore-node
         "dhw_power": "Chaudière puissance instantanée ECS",
         "heating_power": "Chaudière puissance instantanée chauffage",
         "pressure": "Chaudière pression",
+        "boiler_outside_temperature": "Chaudière température extérieure",
         "dhw_consumption": "Chaudière consommation ECS totale",
         "heating_consumption": "Chaudière consommation chauffage totale",
         "daily_dhw_consumption": "Chaudière consommation ECS jour précédent",
@@ -125,6 +127,7 @@ _BOILER_SENSORS = (  # chkstyle: ignore-node
     ('dhw_power', 'dhwInstantPower', 'power', 'kW', 'measurement'),
     ('heating_power', 'heatingInstantPower', 'power', 'kW', 'measurement'),
     ('pressure', 'pressure', 'pressure', 'bar', 'measurement'),
+    ('boiler_outside_temperature', 'outsideTemperature', 'temperature', '°C', 'measurement'),
     ('dhw_consumption', 'dhwConsumption', 'energy', 'kWh', 'diagnostic'),
     ('heating_consumption', 'heatingConsumption', 'energy', 'kWh', 'diagnostic'),
     ('daily_dhw_consumption', 'dailyDhwConsumption', 'energy', 'kWh', 'daily'),
@@ -330,6 +333,7 @@ class MqttAdapter:
                 "boiler/cdcTemperature": _fmt(b.cdc_temperature), "boiler/cdcSafetyTemperature": _fmt(b.cdc_safety_temperature),
                 "boiler/flueTemperature": _fmt(b.flue_temperature), "boiler/dhwInstantPower": _fmt(b.dhw_power),
                 "boiler/heatingInstantPower": _fmt(b.heating_power), "boiler/pressure": _fmt(b.pressure),
+                "boiler/outsideTemperature": _fmt(b.outside_temperature),
                 "boiler/dhwConsumption": _fmt_int(b.dhw_consumption), "boiler/heatingConsumption": _fmt_int(b.heating_consumption),
                 "boiler/status": self._boiler_status_label(b.status)})
             # The previous-day counters go out with the day they cover, so HA's statistics add each day exactly once.
