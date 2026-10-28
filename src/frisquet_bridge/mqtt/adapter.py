@@ -256,8 +256,9 @@ class MqttAdapter:
         prefix, simple = f"z{zone}", self._is_simple_zone(zone)
         commands = {} if self._is_read_only_satellite_zone(zone) else dict(mode_command_topic=self._topic(f"{prefix}/mode/set"),
             preset_mode_command_topic=self._topic(f"{prefix}/preset/set"), temperature_command_topic=self._topic(f"{prefix}/targetTemperature/set"))
+        presets = dict(preset_modes=list(SIMPLE_PRESET_MODES if simple else MQTT_PRESET_MODES)) if commands else {}
         climate = self._component("climate", f"zone{zone}_climate", self._label("zone_heating", zone=zone),
-            modes=list(SIMPLE_HVAC_MODES if simple else HVAC_MODES), preset_modes=list(SIMPLE_PRESET_MODES if simple else MQTT_PRESET_MODES),
+            modes=list(SIMPLE_HVAC_MODES if simple else HVAC_MODES), **presets,
             mode_state_topic=self._topic(f"{prefix}/mode"), preset_mode_state_topic=self._topic(f"{prefix}/preset"),
             action_topic=self._topic(f"{prefix}/action"), current_temperature_topic=self._topic(f"{prefix}/currentTemperature"),
             temperature_state_topic=self._topic(f"{prefix}/targetTemperature"),
